@@ -3,8 +3,8 @@
 # Core dependencies
 numpy>=1.20.0
 
-# Optional: GPU support via SlangPy
-# slangpy>=0.1.0
+# GPU support via SlangPy (required for GPU tests)
+slangpy>=0.1.0
 
 # Development dependencies
 pytest>=6.0

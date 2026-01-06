@@ -294,7 +294,8 @@ void test_pow_square() {
     XValue b = XValue::number(2.0f);
     XValue c = xvalue_pow(a, b);
     
-    bool passed = c.asNumber() == 25.0f;
+    // Use tolerance for GPU pow() precision
+    bool passed = abs(c.asNumber() - 25.0f) < 0.0001f;
     report_arith_test(150, passed, 25.0f, c.asNumber());
 }
 
@@ -305,7 +306,8 @@ void test_pow_cube() {
     XValue b = XValue::number(3.0f);
     XValue c = xvalue_pow(a, b);
     
-    bool passed = c.asNumber() == 27.0f;
+    // Use tolerance for GPU pow() precision
+    bool passed = abs(c.asNumber() - 27.0f) < 0.0001f;
     report_arith_test(151, passed, 27.0f, c.asNumber());
 }
 
@@ -444,14 +446,14 @@ void run_all_arithmetic_tests() {
         report_arith_test(140, c.asNumber() == 2.0f, 2.0f, c.asNumber());
     }
     
-    // Power
+    // Power (use tolerance for GPU precision)
     {
         XValue c = xvalue_pow(XValue::number(5.0f), XValue::number(2.0f));
-        report_arith_test(150, c.asNumber() == 25.0f, 25.0f, c.asNumber());
+        report_arith_test(150, abs(c.asNumber() - 25.0f) < 0.0001f, 25.0f, c.asNumber());
     }
     {
         XValue c = xvalue_pow(XValue::number(3.0f), XValue::number(3.0f));
-        report_arith_test(151, c.asNumber() == 27.0f, 27.0f, c.asNumber());
+        report_arith_test(151, abs(c.asNumber() - 27.0f) < 0.0001f, 27.0f, c.asNumber());
     }
     
     // Negation
