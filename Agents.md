@@ -27,18 +27,12 @@ xscript/
 │   ├── table.slang       # Hash table + metatables
 │   ├── string.slang      # String pool
 │   ├── gc.slang          # Reference counting GC
-│   ├── ops.slang         # Opcode implementations
+│   ├── ops.slang         # Opcode definitions + VMState
 │   ├── vm.slang          # VM main loop
 │   ├── entity.slang      # ECS entity pool
 │   ├── spawn.slang       # GPU spawn buffer
 │   ├── dispatch.slang    # System dispatch kernel
 │   └── tests/            # Slang unit tests
-│       ├── test_value.slang
-│       ├── test_table.slang
-│       ├── test_entity.slang
-│       ├── test_spawn.slang
-│       ├── test_dispatch.slang
-│       └── ...
 │
 ├── compiler/             # Python Compiler
 │   ├── tokens.py         # Token definitions
@@ -51,18 +45,17 @@ xscript/
 │
 ├── api/                  # Python API
 │   ├── types.py          # XValue/XTable wrappers
-│   ├── context.py        # Script execution context
+│   ├── context.py        # Script execution context + GPU dispatch
 │   └── interpreter.py    # CPU interpreter (debug)
 │
-├── tests/                # Python tests
+├── tests/                # Python tests (pytest)
 │   ├── test_compiler.py
-│   ├── test_interpreter.py
-│   └── test_vm_standalone.py
+│   ├── test_gpu_dispatch.py  # Main GPU dispatch tests
+│   ├── test_integration.py
+│   └── ...
 │
-└── examples/             # Example scripts
-    ├── hello_world.xs
-    ├── game_npc.xs
-    └── vector_math.xs
+├── demo.py               # Working GPU dispatch demo
+└── examples/             # Example scripts (.xs)
 ```
 
 ## Core Data Structures
@@ -83,7 +76,7 @@ struct XValue {
 | bool | 1 | 0 or 1 |
 | number | 2 | float32 bit pattern (asuint/asfloat) |
 | string | 3 | String pool index |
-| table | 4 | Heap offset |
+| table | 4 | Heap word offset |
 | function | 5 | Function index |
 
 ### Opcodes
@@ -98,65 +91,33 @@ struct XValue {
 | 0x50-0x5F | Functions | CALL, RETURN, CALL_HOST |
 | 0x60-0x6F | Tables | NEW_TABLE, GET_TABLE, SET_TABLE |
 | 0x70-0x7F | Metatables | GET_META, SET_META |
-| 0x80-0x8F | ECS | SPAWN_ENTITY, DESTROY_ENTITY, GET_ENTITY, HAS_COMPONENT |
+| 0x80-0x8F | ECS | SPAWN_ENTITY, DESTROY_ENTITY, GET_ENTITY |
 | 0xFF | Special | HALT |
 
-### ECS Structures
+### Key GPU Buffers
 
-```slang
-struct EntitySlot {
-    uint tablePtr;      // Entity table in heap
-    uint generation;    // Handle validation
-    uint flags;         // ACTIVE, DESTROYED
-    uint reserved;
-};
-
-struct SpawnRequest {
-    uint tablePtr;      // Spawned table
-    uint sourceEntityId;
-    uint sourceThreadId;
-    uint status;        // PENDING, COMMITTED, FAILED
-};
-
-struct DispatchConfig {
-    uint functionIndex;
-    uint entityCount;
-    uint requiredKeyCount;
-    uint requiredKeys[8];
-    float dt;
-    uint flags;
-};
-```
+| Buffer | Purpose |
+|--------|---------|
+| `g_bytecode` | Compiled bytecode (uint32 words) |
+| `g_constants` | Constant pool (XValue array) |
+| `g_functions` | Function descriptors |
+| `g_heapMemory` | Shared heap for tables |
+| `g_entityPool` | Entity slots (tablePtr, generation, flags) |
+| `g_vmStates` | Per-thread VM state |
+| `g_dispatchState` | Stats: processed, skipped, errors |
 
 ## Coding Standards
 
 ### Slang Code
 
-1. **File Organization**: One module per file, use `// =====` section dividers
-2. **Naming**:
-   - Constants: `TYPE_NIL`, `OP_ADD` (UPPER_SNAKE)
-   - Structs: `XValue`, `VMState` (PascalCase)
-   - Functions: `xvalue_add`, `vm_push` (snake_case)
-3. **32-bit Constraint**: Use `uint` and `float` only, no 64-bit types
-4. **Comments**: Use `//` single-line, document important functions
+1. **Naming**: Constants `TYPE_NIL`, Structs `XValue`, Functions `xvalue_add`
+2. **32-bit Constraint**: Use `uint` and `float` only, no 64-bit types
+3. **VM_STACK_SIZE**: Currently 32 (reduced for GPU resource limits)
 
 ### Python Code
 
 1. **Type Hints**: All function parameters and returns
-2. **Docstrings**: Google-style for public APIs
-3. **Tests**: Each module has corresponding `test_*.py`
-
-### Tests
-
-1. **Slang Tests**:
-   - Use `RWStructuredBuffer<uint> g_testResults` for results
-   - Each test has unique ID
-   - Provide `test_*` entry points
-
-2. **Python Tests**:
-   - Use pytest framework
-   - Class names: `Test*`
-   - Method names: `test_*`
+2. **Tests**: Use pytest, class `Test*`, method `test_*`
 
 ## Common Tasks
 
@@ -169,67 +130,31 @@ struct DispatchConfig {
 5. Add CPU implementation in `api/interpreter.py`
 6. Add tests
 
-### Add ECS Opcode
-
-1. Add constant in `runtime/ops.slang` (0x80-0x8F range)
-2. Add ECS operation function in `runtime/ops.slang`
-3. Add case in `runtime/vm.slang` `vm_step()`
-4. Add tests in `runtime/tests/test_ops.slang`
-
-### Add Builtin Function
-
-1. Add in `api/context.py` `_register_builtins()`
-2. Use `@self.register("name")` decorator
-3. Add tests
-
-### Add Metamethod
-
-1. Add `META_*` constant in `runtime/table.slang`
-2. Handle in `runtime/ops.slang`
-3. Add Python support in `XTable` class
-
-## Debug Tips
-
-### View Generated Bytecode
-
-```python
-from compiler.codegen import CodeGenerator
-from compiler.parser import Parser
-from compiler.lexer import Lexer
-
-source = "var x = 10 + 20;"
-lexer = Lexer(source)
-parser = Parser(lexer.tokenize())
-ast = parser.parse()
-codegen = CodeGenerator()
-bytecode = codegen.generate(ast)
-print(bytecode.disassemble())
-```
-
 ### Run Tests
 
 ```bash
-# Python tests
+# All Python tests
 python -m pytest tests/ -v
 
-# Specific test
-python -m pytest tests/test_compiler.py -v
+# GPU dispatch tests only
+python -m pytest tests/test_gpu_dispatch.py -v
+
+# Quick demo
+python demo.py
 ```
-
-## TODO
-
-- [ ] Closure and upvalue support
-- [ ] String concatenation
-- [ ] Table iterators (pairs/ipairs)
-- [ ] SlangPy GPU integration
-- [ ] Standard library
 
 ## Notes
 
-1. **32-bit Float Precision**: Using float32, large values may lose precision
-2. **GPU Memory**: Heap is fixed size, requires pre-allocation
-3. **Reference Counting**: Watch for circular references
-4. **Byte Order**: Bytecode uses little-endian
+1. **Heap Pointer**: Uses word offset (not byte offset) in XValue.data
+2. **Entity Pool**: Entity 0 with tablePtr=0 is treated as invalid
+3. **GPU Filtering**: Component filtering runs on GPU (`dispatch_entity_matches`)
+4. **FunctionDescriptor Order**: [codeOffset, paramCount, localCount, upvalueCount, nameIndex]
+5. **Buffer Sizes**: HeapAllocator state = 32 bytes, EntityPoolState = 32 bytes
+
+## TODO
+
+- [ ] String concatenation
+- [ ] Table iterators (pairs/ipairs)
 
 ## Resources
 
