@@ -1,6 +1,9 @@
 // XScript Table Implementation (32-bit)
 // Hash table with metatable support
 
+import value;
+import heap;
+
 // =============================================================================
 // Constants
 // =============================================================================

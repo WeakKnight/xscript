@@ -1,6 +1,10 @@
 // XScript VM Operations (32-bit)
 // Instruction implementations
 
+import value;
+import gc;
+import table;
+
 // =============================================================================
 // Opcode Definitions
 // =============================================================================

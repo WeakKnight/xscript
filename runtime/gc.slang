@@ -1,5 +1,9 @@
 // XScript Garbage Collection (32-bit)
 // Reference counting with cycle detection support
+import value;
+import string;
+import heap;
+import table;
 
 // =============================================================================
 // GC State
