@@ -229,10 +229,9 @@ class TestGPUDispatchFilter:
         
         stats = ctx.dispatch(script, "mark", ctx.filter("marker"), dt=0)
         
-        # CPU pre-filters entities, so only matching ones are sent to GPU
-        # Entity 1 without "marker" is not sent at all, not counted as skipped
+        # GPU-side filtering: all entities sent to GPU, non-matching ones skipped
         assert stats.processed == 2
-        assert stats.skipped == 0  # No GPU-side skips since CPU pre-filters
+        assert stats.skipped == 1  # Entity 1 without "marker" is skipped by GPU
         
         # Verify
         assert ctx.get_entity(0)["marked"] == 1
@@ -299,10 +298,10 @@ class TestGPUDispatchStats:
         
         stats = ctx.dispatch(script, "process", ctx.filter("a", "b"), dt=0)
         
-        # CPU pre-filters entities, so only matching ones (with both "a" and "b") are sent to GPU
-        # The 3 entities missing "b" are not sent at all, not counted as skipped
+        # GPU-side filtering: all 8 entities sent to GPU
+        # 5 match (have both "a" and "b"), 3 skipped (missing "b")
         assert stats.processed == 5
-        assert stats.skipped == 0  # No GPU-side skips since CPU pre-filters
+        assert stats.skipped == 3  # 3 entities missing "b" are skipped by GPU
         assert stats.errors == 0
 
 

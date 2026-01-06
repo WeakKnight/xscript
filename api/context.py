@@ -990,25 +990,27 @@ class Context:
         state = np.array([len(self._strings), len(string_data), 0, 0, 0, 0, 0, 0], dtype=np.uint32)
         self._gpu_string_pool_state.copy_from_numpy(state)
     
-    def _build_filtered_entity_list(self, entity_filter: Filter) -> np.ndarray:
-        """Build list of packed entity IDs matching the filter."""
-        matching_ids = []
+    def _build_all_entity_list(self) -> np.ndarray:
+        """Build list of ALL packed entity IDs for GPU-side filtering.
+        
+        GPU will filter entities based on required component keys.
+        This is more efficient when most entities match the filter.
+        """
+        entity_ids = []
         
         # Entity ID format: (generation << 20) | (index & 0x000FFFFF)
         ENTITY_GENERATION_SHIFT = 20
         ENTITY_INDEX_MASK = 0x000FFFFF
         
-        for entity_id, table in self._entities.items():
-            entity_dict = table.to_dict()
-            if entity_filter.matches(entity_dict):
-                # Pack entity ID with generation
-                generation = self._entity_generation.get(entity_id, 0)
-                packed_id = (generation << ENTITY_GENERATION_SHIFT) | (entity_id & ENTITY_INDEX_MASK)
-                matching_ids.append(packed_id)
+        for entity_id in self._entities.keys():
+            # Pack entity ID with generation
+            generation = self._entity_generation.get(entity_id, 0)
+            packed_id = (generation << ENTITY_GENERATION_SHIFT) | (entity_id & ENTITY_INDEX_MASK)
+            entity_ids.append(packed_id)
         
         # Convert to numpy array
-        if matching_ids:
-            return np.array(matching_ids, dtype=np.uint32)
+        if entity_ids:
+            return np.array(entity_ids, dtype=np.uint32)
         else:
             return np.array([0], dtype=np.uint32)  # Dummy array
     
@@ -1511,15 +1513,15 @@ class Context:
         # Sync entities to GPU
         self._sync_entities_to_gpu()
         
-        # Build filtered entity list
-        entity_ids = self._build_filtered_entity_list(entity_filter)
-        entity_count = len(entity_ids) if entity_ids[0] != 0 or len(self._entities) > 0 else 0
+        # Build list of ALL entities - GPU will filter based on required keys
+        entity_ids = self._build_all_entity_list()
+        entity_count = len(entity_ids) if len(self._entities) > 0 else 0
         
         if self.debug:
             print(f"Entity IDs for dispatch: {entity_ids[:min(10, len(entity_ids))]}... (count={entity_count})")
         
         if entity_count == 0:
-            return DispatchStats(processed=0, skipped=len(self._entities))
+            return DispatchStats(processed=0, skipped=0)
         
         # Upload entity list
         padded_ids = np.zeros(MAX_ENTITIES, dtype=np.uint32)
