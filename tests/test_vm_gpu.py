@@ -525,6 +525,253 @@ class HeapTestRunner(GPUTestRunner):
 
 
 # =============================================================================
+# String Test Runner
+# =============================================================================
+
+class StringTestRunner(GPUTestRunner):
+    """Runner for test_string.slang tests.
+    
+    This runner creates buffers for string pool data, hash table, and state.
+    """
+    
+    # TestResult struct: uint testId, uint passed, uint expected, uint actual
+    RESULT_STRUCT_SIZE = 16  # 4 + 4 + 4 + 4 bytes
+    
+    # String pool configuration
+    STRING_DATA_SIZE = 8192      # 8192 uints for string data
+    HASH_TABLE_SIZE = 1024       # 1024 buckets
+    STRING_STATE_SIZE = 12       # StringPoolState struct = 3 uints = 12 bytes
+    TEMP_CHARS_SIZE = 256        # Temp buffer for input chars
+    INTERN_RESULTS_SIZE = 128    # Buffer for concurrent intern results
+    
+    def __init__(self):
+        super().__init__("test_string.slang")
+        self._create_buffers(self.RESULT_STRUCT_SIZE)
+        self._create_string_buffers()
+    
+    def _create_string_buffers(self):
+        """Create GPU buffers for string pool."""
+        # String data buffer
+        self._string_data_buffer = self.device.create_buffer(
+            size=self.STRING_DATA_SIZE * 4,  # 4 bytes per uint
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # Hash table buffer
+        self._hash_table_buffer = self.device.create_buffer(
+            size=self.HASH_TABLE_SIZE * 4,
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # String state buffer (StringPoolState struct)
+        self._string_state_buffer = self.device.create_buffer(
+            size=self.STRING_STATE_SIZE,
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # Temp chars buffer (for passing test input)
+        self._temp_chars_buffer = self.device.create_buffer(
+            size=self.TEMP_CHARS_SIZE * 4,
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # Intern results buffer (for concurrent tests)
+        self._intern_results_buffer = self.device.create_buffer(
+            size=self.INTERN_RESULTS_SIZE * 4,
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # Initialize buffers to zero
+        self._string_data_buffer.copy_from_numpy(np.zeros(self.STRING_DATA_SIZE, dtype=np.uint32))
+        self._hash_table_buffer.copy_from_numpy(np.zeros(self.HASH_TABLE_SIZE, dtype=np.uint32))
+        self._string_state_buffer.copy_from_numpy(np.zeros(3, dtype=np.uint32))
+        self._temp_chars_buffer.copy_from_numpy(np.zeros(self.TEMP_CHARS_SIZE, dtype=np.uint32))
+        self._intern_results_buffer.copy_from_numpy(np.zeros(self.INTERN_RESULTS_SIZE, dtype=np.uint32))
+    
+    def run_kernel(self, kernel_name: str, thread_count: Tuple[int, int, int] = (1, 1, 1)) -> Tuple[bool, str]:
+        """Run a compute kernel with string pool buffers."""
+        kernel = self._get_kernel(kernel_name)
+        
+        # Dispatch with all string pool buffers
+        kernel.dispatch(
+            thread_count=slangpy.uint3(thread_count[0], thread_count[1], thread_count[2]),
+            vars={
+                "g_testResults": self._result_buffer,
+                "g_testCount": self._count_buffer,
+                "g_stringData": self._string_data_buffer,
+                "g_stringHashTable": self._hash_table_buffer,
+                "g_stringState": self._string_state_buffer,
+                "g_tempChars": self._temp_chars_buffer,
+                "g_internResults": self._intern_results_buffer
+            }
+        )
+        
+        return self._check_results()
+    
+    def _check_results(self) -> Tuple[bool, str]:
+        """Check string test results."""
+        count_data = self._count_buffer.to_numpy()
+        count = int(count_data[0])
+        
+        if count == 0:
+            return False, "No test results reported"
+        
+        result_data = self._result_buffer.to_numpy()
+        result_bytes = result_data.tobytes()
+        
+        all_passed = True
+        messages = []
+        
+        for i in range(min(count, self.MAX_RESULTS)):
+            offset = i * self.RESULT_STRUCT_SIZE
+            test_id, passed, expected, actual = struct.unpack_from(
+                'IIII', result_bytes, offset
+            )
+            
+            if passed == 0:
+                all_passed = False
+                messages.append(
+                    f"Test {test_id} FAILED: expected={expected}, actual={actual}"
+                )
+        
+        return all_passed, "; ".join(messages) if messages else "All tests passed"
+    
+    def _reset_buffers(self):
+        """Reset all buffers before a test."""
+        self._count_buffer.copy_from_numpy(np.array([0], dtype=np.uint32))
+        self._string_data_buffer.copy_from_numpy(np.zeros(self.STRING_DATA_SIZE, dtype=np.uint32))
+        self._hash_table_buffer.copy_from_numpy(np.zeros(self.HASH_TABLE_SIZE, dtype=np.uint32))
+        self._string_state_buffer.copy_from_numpy(np.zeros(3, dtype=np.uint32))
+        self._temp_chars_buffer.copy_from_numpy(np.zeros(self.TEMP_CHARS_SIZE, dtype=np.uint32))
+        self._intern_results_buffer.copy_from_numpy(np.zeros(self.INTERN_RESULTS_SIZE, dtype=np.uint32))
+    
+    def run_test(self, kernel_name: str) -> None:
+        """Run a single test kernel and assert it passes."""
+        self._reset_buffers()
+        passed, message = self.run_kernel(kernel_name)
+        assert passed, f"GPU test '{kernel_name}' failed: {message}"
+    
+    def run_concurrent_test(self, kernel_name: str, thread_count: Tuple[int, int, int]) -> None:
+        """Run a concurrent test kernel with specified thread count."""
+        self._reset_buffers()
+        passed, message = self.run_kernel(kernel_name, thread_count)
+        assert passed, f"GPU concurrent test '{kernel_name}' failed: {message}"
+
+
+# =============================================================================
+# Table Test Runner
+# =============================================================================
+
+class TableTestRunner(GPUTestRunner):
+    """Runner for test_table.slang tests.
+    
+    This runner creates buffers for heap memory, heap state, and table results.
+    """
+    
+    # TestResult struct: uint testId, uint passed, uint expected, uint actual
+    RESULT_STRUCT_SIZE = 16  # 4 + 4 + 4 + 4 bytes
+    
+    # Heap configuration
+    HEAP_SIZE = 16384       # 16384 uints = 64KB heap memory
+    HEAP_STATE_SIZE = 32    # HeapAllocator struct = 8 uints = 32 bytes
+    TABLE_RESULTS_SIZE = 64 # Buffer for concurrent test results
+    
+    def __init__(self):
+        super().__init__("test_table.slang")
+        self._create_buffers(self.RESULT_STRUCT_SIZE)
+        self._create_table_buffers()
+    
+    def _create_table_buffers(self):
+        """Create GPU buffers for table tests."""
+        # Heap memory buffer
+        self._heap_memory_buffer = self.device.create_buffer(
+            size=self.HEAP_SIZE * 4,
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # Heap state buffer
+        self._heap_state_buffer = self.device.create_buffer(
+            size=self.HEAP_STATE_SIZE,
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # Table results buffer (for concurrent tests)
+        self._table_results_buffer = self.device.create_buffer(
+            size=self.TABLE_RESULTS_SIZE * 4,
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # Initialize buffers to zero
+        self._heap_memory_buffer.copy_from_numpy(np.zeros(self.HEAP_SIZE, dtype=np.uint32))
+        self._heap_state_buffer.copy_from_numpy(np.zeros(8, dtype=np.uint32))
+        self._table_results_buffer.copy_from_numpy(np.zeros(self.TABLE_RESULTS_SIZE, dtype=np.uint32))
+    
+    def run_kernel(self, kernel_name: str, thread_count: Tuple[int, int, int] = (1, 1, 1)) -> Tuple[bool, str]:
+        """Run a compute kernel with table buffers."""
+        kernel = self._get_kernel(kernel_name)
+        
+        kernel.dispatch(
+            thread_count=slangpy.uint3(thread_count[0], thread_count[1], thread_count[2]),
+            vars={
+                "g_testResults": self._result_buffer,
+                "g_testCount": self._count_buffer,
+                "g_heapMemory": self._heap_memory_buffer,
+                "g_heapState": self._heap_state_buffer,
+                "g_tableResults": self._table_results_buffer
+            }
+        )
+        
+        return self._check_results()
+    
+    def _check_results(self) -> Tuple[bool, str]:
+        """Check table test results."""
+        count_data = self._count_buffer.to_numpy()
+        count = int(count_data[0])
+        
+        if count == 0:
+            return False, "No test results reported"
+        
+        result_data = self._result_buffer.to_numpy()
+        result_bytes = result_data.tobytes()
+        
+        all_passed = True
+        messages = []
+        
+        for i in range(min(count, self.MAX_RESULTS)):
+            offset = i * self.RESULT_STRUCT_SIZE
+            test_id, passed, expected, actual = struct.unpack_from(
+                'IIII', result_bytes, offset
+            )
+            
+            if passed == 0:
+                all_passed = False
+                messages.append(
+                    f"Test {test_id} FAILED: expected={expected}, actual={actual}"
+                )
+        
+        return all_passed, "; ".join(messages) if messages else "All tests passed"
+    
+    def _reset_buffers(self):
+        """Reset all buffers before a test."""
+        self._count_buffer.copy_from_numpy(np.array([0], dtype=np.uint32))
+        self._heap_memory_buffer.copy_from_numpy(np.zeros(self.HEAP_SIZE, dtype=np.uint32))
+        self._heap_state_buffer.copy_from_numpy(np.zeros(8, dtype=np.uint32))
+        self._table_results_buffer.copy_from_numpy(np.zeros(self.TABLE_RESULTS_SIZE, dtype=np.uint32))
+    
+    def run_test(self, kernel_name: str) -> None:
+        """Run a single test kernel and assert it passes."""
+        self._reset_buffers()
+        passed, message = self.run_kernel(kernel_name)
+        assert passed, f"GPU test '{kernel_name}' failed: {message}"
+    
+    def run_concurrent_test(self, kernel_name: str, thread_count: Tuple[int, int, int]) -> None:
+        """Run a concurrent test kernel with specified thread count."""
+        self._reset_buffers()
+        passed, message = self.run_kernel(kernel_name, thread_count)
+        assert passed, f"GPU concurrent test '{kernel_name}' failed: {message}"
+
+
+# =============================================================================
 # Pytest Fixtures
 # =============================================================================
 
@@ -562,6 +809,18 @@ def ops_runner():
 def heap_runner():
     """Create a HeapTestRunner for the test module."""
     return HeapTestRunner()
+
+
+@pytest.fixture(scope="module")
+def string_runner():
+    """Create a StringTestRunner for the test module."""
+    return StringTestRunner()
+
+
+@pytest.fixture(scope="module")
+def table_runner():
+    """Create a TableTestRunner for the test module."""
+    return TableTestRunner()
 
 
 # =============================================================================
@@ -986,6 +1245,288 @@ class TestHeapGPU:
     def test_concurrent_alloc_varying_sizes(self, heap_runner):
         """16 threads allocating different sizes concurrently."""
         heap_runner.run_concurrent_test("test_concurrent_alloc_varying_sizes", (1, 1, 1))
+
+
+# =============================================================================
+# String Tests (test_string.slang)
+# =============================================================================
+
+class TestStringGPU:
+    """GPU tests for string pool operations from test_string.slang."""
+    
+    # Helper function tests (600-609)
+    def test_hash_empty(self, string_runner):
+        string_runner.run_test("test_hash_empty")
+    
+    def test_hash_single_char(self, string_runner):
+        string_runner.run_test("test_hash_single_char")
+    
+    def test_hash_multi_char(self, string_runner):
+        string_runner.run_test("test_hash_multi_char")
+    
+    def test_hash_consistency(self, string_runner):
+        string_runner.run_test("test_hash_consistency")
+    
+    # String pool initialization tests (610-614)
+    def test_pool_init_count(self, string_runner):
+        string_runner.run_test("test_pool_init_count")
+    
+    def test_pool_init_next_free(self, string_runner):
+        string_runner.run_test("test_pool_init_next_free")
+    
+    def test_pool_init_hash_table(self, string_runner):
+        string_runner.run_test("test_pool_init_hash_table")
+    
+    # Basic string operations tests (620-639)
+    def test_length_null(self, string_runner):
+        string_runner.run_test("test_length_null")
+    
+    def test_length_valid(self, string_runner):
+        string_runner.run_test("test_length_valid")
+    
+    def test_gethash_null(self, string_runner):
+        string_runner.run_test("test_gethash_null")
+    
+    def test_gethash_valid(self, string_runner):
+        string_runner.run_test("test_gethash_valid")
+    
+    def test_charat_first(self, string_runner):
+        string_runner.run_test("test_charat_first")
+    
+    def test_charat_middle(self, string_runner):
+        string_runner.run_test("test_charat_middle")
+    
+    def test_charat_out_of_bounds(self, string_runner):
+        string_runner.run_test("test_charat_out_of_bounds")
+    
+    def test_charat_null(self, string_runner):
+        string_runner.run_test("test_charat_null")
+    
+    def test_equals_same_index(self, string_runner):
+        string_runner.run_test("test_equals_same_index")
+    
+    def test_equals_same_content(self, string_runner):
+        string_runner.run_test("test_equals_same_content")
+    
+    def test_equals_different_content(self, string_runner):
+        string_runner.run_test("test_equals_different_content")
+    
+    def test_equals_different_length(self, string_runner):
+        string_runner.run_test("test_equals_different_length")
+    
+    def test_equals_null(self, string_runner):
+        string_runner.run_test("test_equals_null")
+    
+    def test_equals_both_null(self, string_runner):
+        string_runner.run_test("test_equals_both_null")
+    
+    # String interning tests (640-659)
+    def test_intern_first(self, string_runner):
+        string_runner.run_test("test_intern_first")
+    
+    def test_intern_same_returns_same(self, string_runner):
+        string_runner.run_test("test_intern_same_returns_same")
+    
+    def test_intern_different_returns_different(self, string_runner):
+        string_runner.run_test("test_intern_different_returns_different")
+    
+    def test_intern_empty(self, string_runner):
+        string_runner.run_test("test_intern_empty")
+    
+    def test_intern_refcount_increment(self, string_runner):
+        string_runner.run_test("test_intern_refcount_increment")
+    
+    def test_intern_pool_count(self, string_runner):
+        string_runner.run_test("test_intern_pool_count")
+    
+    def test_intern_max_length(self, string_runner):
+        string_runner.run_test("test_intern_max_length")
+    
+    # Reference counting tests (660-669)
+    def test_incref(self, string_runner):
+        string_runner.run_test("test_incref")
+    
+    def test_incref_null(self, string_runner):
+        string_runner.run_test("test_incref_null")
+    
+    def test_decref(self, string_runner):
+        string_runner.run_test("test_decref")
+    
+    def test_decref_returns_true(self, string_runner):
+        string_runner.run_test("test_decref_returns_true")
+    
+    def test_decref_null(self, string_runner):
+        string_runner.run_test("test_decref_null")
+    
+    def test_refcount_multiple(self, string_runner):
+        string_runner.run_test("test_refcount_multiple")
+    
+    # Concurrent tests (670-679)
+    def test_concurrent_intern_same(self, string_runner):
+        """32 threads concurrently interning the same string."""
+        string_runner.run_concurrent_test("test_concurrent_intern_same", (1, 1, 1))
+    
+    def test_concurrent_intern_different(self, string_runner):
+        """32 threads concurrently interning different strings."""
+        string_runner.run_concurrent_test("test_concurrent_intern_different", (1, 1, 1))
+    
+    def test_concurrent_incref(self, string_runner):
+        """32 threads concurrently incrementing refcount."""
+        string_runner.run_concurrent_test("test_concurrent_incref", (1, 1, 1))
+    
+    def test_concurrent_decref(self, string_runner):
+        """16 threads concurrently decrementing refcount."""
+        string_runner.run_concurrent_test("test_concurrent_decref", (1, 1, 1))
+    
+    def test_concurrent_intern_mixed(self, string_runner):
+        """64 threads interning mix of same and different strings."""
+        string_runner.run_concurrent_test("test_concurrent_intern_mixed", (1, 1, 1))
+
+
+# =============================================================================
+# Table Tests (test_table.slang)
+# =============================================================================
+
+class TestTableGPU:
+    """GPU tests for table operations from test_table.slang."""
+    
+    # Hash function tests (700-709)
+    def test_hash_nil(self, table_runner):
+        table_runner.run_test("test_hash_nil")
+    
+    def test_hash_number(self, table_runner):
+        table_runner.run_test("test_hash_number")
+    
+    def test_hash_bool(self, table_runner):
+        table_runner.run_test("test_hash_bool")
+    
+    def test_hash_different(self, table_runner):
+        table_runner.run_test("test_hash_different")
+    
+    def test_hash_consistent(self, table_runner):
+        table_runner.run_test("test_hash_consistent")
+    
+    # XValue heap helpers tests (710-719)
+    def test_xvalue_roundtrip_nil(self, table_runner):
+        table_runner.run_test("test_xvalue_roundtrip_nil")
+    
+    def test_xvalue_roundtrip_number(self, table_runner):
+        table_runner.run_test("test_xvalue_roundtrip_number")
+    
+    def test_xvalue_roundtrip_bool(self, table_runner):
+        table_runner.run_test("test_xvalue_roundtrip_bool")
+    
+    def test_xvalue_multiple_offsets(self, table_runner):
+        table_runner.run_test("test_xvalue_multiple_offsets")
+    
+    # Table creation tests (720-729)
+    def test_table_new_default(self, table_runner):
+        table_runner.run_test("test_table_new_default")
+    
+    def test_table_new_custom(self, table_runner):
+        table_runner.run_test("test_table_new_custom")
+    
+    def test_table_new_valid_type(self, table_runner):
+        table_runner.run_test("test_table_new_valid_type")
+    
+    def test_table_new_count_zero(self, table_runner):
+        table_runner.run_test("test_table_new_count_zero")
+    
+    def test_table_new_metatable_nil(self, table_runner):
+        table_runner.run_test("test_table_new_metatable_nil")
+    
+    # Table get/set tests (730-749)
+    def test_table_set_single(self, table_runner):
+        table_runner.run_test("test_table_set_single")
+    
+    def test_table_get_existing(self, table_runner):
+        table_runner.run_test("test_table_get_existing")
+    
+    def test_table_get_nonexisting(self, table_runner):
+        table_runner.run_test("test_table_get_nonexisting")
+    
+    def test_table_set_update(self, table_runner):
+        table_runner.run_test("test_table_set_update")
+    
+    def test_table_set_nil_key(self, table_runner):
+        table_runner.run_test("test_table_set_nil_key")
+    
+    def test_table_count_increases(self, table_runner):
+        table_runner.run_test("test_table_count_increases")
+    
+    def test_table_multiple_keys(self, table_runner):
+        table_runner.run_test("test_table_multiple_keys")
+    
+    def test_table_get_non_table(self, table_runner):
+        table_runner.run_test("test_table_get_non_table")
+    
+    def test_table_collision(self, table_runner):
+        table_runner.run_test("test_table_collision")
+    
+    def test_table_full(self, table_runner):
+        table_runner.run_test("test_table_full")
+    
+    def test_table_number_key(self, table_runner):
+        table_runner.run_test("test_table_number_key")
+    
+    def test_table_bool_key(self, table_runner):
+        table_runner.run_test("test_table_bool_key")
+    
+    def test_table_string_key(self, table_runner):
+        table_runner.run_test("test_table_string_key")
+    
+    # Metatable tests (750-769)
+    def test_metatable_nil(self, table_runner):
+        table_runner.run_test("test_metatable_nil")
+    
+    def test_metatable_set(self, table_runner):
+        table_runner.run_test("test_metatable_set")
+    
+    def test_metatable_get_after_set(self, table_runner):
+        table_runner.run_test("test_metatable_get_after_set")
+    
+    def test_metatable_clear(self, table_runner):
+        table_runner.run_test("test_metatable_clear")
+    
+    def test_metatable_non_table(self, table_runner):
+        table_runner.run_test("test_metatable_non_table")
+    
+    def test_getmetamethod_existing(self, table_runner):
+        table_runner.run_test("test_getmetamethod_existing")
+    
+    def test_getmetamethod_nonexisting(self, table_runner):
+        table_runner.run_test("test_getmetamethod_nonexisting")
+    
+    def test_hasmetamethod_existing(self, table_runner):
+        table_runner.run_test("test_hasmetamethod_existing")
+    
+    def test_hasmetamethod_nonexisting(self, table_runner):
+        table_runner.run_test("test_hasmetamethod_nonexisting")
+    
+    # Table iteration tests (770-779)
+    def test_next_empty(self, table_runner):
+        table_runner.run_test("test_next_empty")
+    
+    def test_next_first(self, table_runner):
+        table_runner.run_test("test_next_first")
+    
+    def test_next_continue(self, table_runner):
+        table_runner.run_test("test_next_continue")
+    
+    def test_next_end(self, table_runner):
+        table_runner.run_test("test_next_end")
+    
+    def test_next_non_table(self, table_runner):
+        table_runner.run_test("test_next_non_table")
+    
+    # Concurrent tests (780-789)
+    def test_concurrent_reads(self, table_runner):
+        """16 threads concurrently reading from same table."""
+        table_runner.run_concurrent_test("test_concurrent_reads", (1, 1, 1))
+    
+    def test_concurrent_writes(self, table_runner):
+        """16 threads concurrently writing to different keys."""
+        table_runner.run_concurrent_test("test_concurrent_writes", (1, 1, 1))
 
 
 # =============================================================================
