@@ -426,7 +426,7 @@ class Context:
         
         # Heap state (freePtr, size)
         self._gpu_heap_state = self._device.create_buffer(
-            size=8,
+            size=32,  # HeapAllocator: 8 uints = 32 bytes
             usage=buffer_usage
         )
         
@@ -605,41 +605,38 @@ class Context:
             print(f"GPU initialized: {self._device}")
     
     def _load_dispatch_kernels(self) -> None:
-        """Load dispatch compute kernels.
-        
-        Currently uses simple dispatch (no VM execution) because the full VM
-        is too complex for GPU shader compilation. The simple dispatch still
-        handles entity filtering and statistics correctly.
-        """
+        """Load dispatch compute kernels."""
         import slangpy as spy
         
-        # Load simple dispatch kernels (doesn't import full VM complexity)
-        simple_init_program = self._session.load_program(
-            str(RUNTIME_DIR / "dispatch_simple"),
-            ["simple_dispatch_init"]
+        # Load the dispatch init kernel
+        init_program = self._session.load_program(
+            str(RUNTIME_DIR / "dispatch"),
+            ["dispatch_init_kernel"]
         )
-        simple_init_desc = spy.ComputeKernelDesc()
-        simple_init_desc.program = simple_init_program
-        self._dispatch_init_kernel = self._device.create_compute_kernel(simple_init_desc)
+        init_desc = spy.ComputeKernelDesc()
+        init_desc.program = init_program
+        self._dispatch_init_kernel = self._device.create_compute_kernel(init_desc)
         
-        simple_main_program = self._session.load_program(
-            str(RUNTIME_DIR / "dispatch_simple"),
-            ["simple_dispatch_main"]
+        # Load the main dispatch kernel (with full VM execution)
+        dispatch_program = self._session.load_program(
+            str(RUNTIME_DIR / "dispatch"),
+            ["system_dispatch"]
         )
-        simple_main_desc = spy.ComputeKernelDesc()
-        simple_main_desc.program = simple_main_program
-        self._dispatch_kernel = self._device.create_compute_kernel(simple_main_desc)
+        dispatch_desc = spy.ComputeKernelDesc()
+        dispatch_desc.program = dispatch_program
+        self._dispatch_kernel = self._device.create_compute_kernel(dispatch_desc)
         
-        simple_finalize_program = self._session.load_program(
-            str(RUNTIME_DIR / "dispatch_simple"),
-            ["simple_dispatch_finalize"]
+        # Load the dispatch finalize kernel
+        finalize_program = self._session.load_program(
+            str(RUNTIME_DIR / "dispatch"),
+            ["dispatch_finalize_kernel"]
         )
-        simple_finalize_desc = spy.ComputeKernelDesc()
-        simple_finalize_desc.program = simple_finalize_program
-        self._dispatch_finalize_kernel = self._device.create_compute_kernel(simple_finalize_desc)
+        finalize_desc = spy.ComputeKernelDesc()
+        finalize_desc.program = finalize_program
+        self._dispatch_finalize_kernel = self._device.create_compute_kernel(finalize_desc)
         
         if self.debug:
-            print("[INFO] Loaded simple dispatch kernels (no VM execution)")
+            print("[INFO] Loaded full VM dispatch kernels")
     
     # =========================================================================
     # GPU Data Upload Methods
@@ -723,9 +720,11 @@ class Context:
         return data
     
     def _pack_functions(self, functions: List) -> np.ndarray:
-        """Pack function descriptors for GPU."""
-        # FunctionDescriptor: name_idx (u32), arity (u32), local_count (u32), 
-        #                     code_offset (u32), code_length (u32)
+        """Pack function descriptors for GPU.
+        
+        Slang FunctionDescriptor struct order:
+          codeOffset, paramCount, localCount, upvalueCount, nameIndex
+        """
         data = np.zeros(MAX_FUNCTIONS * 5, dtype=np.uint32)
         
         for i, func in enumerate(functions):
@@ -733,11 +732,11 @@ class Context:
                 break
             
             base = i * 5
-            data[base] = self.intern_string(func.name)
-            data[base + 1] = func.arity
-            data[base + 2] = func.local_count
-            data[base + 3] = func.code_offset
-            data[base + 4] = func.code_length
+            data[base + 0] = func.code_offset    # codeOffset
+            data[base + 1] = func.arity          # paramCount
+            data[base + 2] = func.local_count    # localCount
+            data[base + 3] = 0                   # upvalueCount (not used yet)
+            data[base + 4] = self.intern_string(func.name)  # nameIndex
         
         return data
     
@@ -769,10 +768,13 @@ class Context:
         Args:
             data: Python dictionary to convert
             heap_data: Heap byte array to write to
-            heap_ptr: Current heap allocation pointer
+            heap_ptr: Current heap allocation pointer (in BYTES)
             
         Returns:
-            Tuple of (table_pointer, new_heap_ptr)
+            Tuple of (table_pointer_in_words, new_heap_ptr_in_bytes)
+            
+        Note: The table_pointer is returned as a WORD index (for Slang's g_heapMemory[ptr])
+              while heap_ptr is tracked in BYTES internally.
         """
         capacity = max(self.TABLE_INITIAL_CAPACITY, len(data) * 2)
         
@@ -782,16 +784,16 @@ class Context:
         total_size_bytes = (header_size + entries_size) * 4
         
         # Align to 4 bytes
-        table_ptr = heap_ptr
+        table_byte_offset = heap_ptr
         new_heap_ptr = heap_ptr + total_size_bytes
         
         # Ensure heap_data is large enough
         while len(heap_data) < new_heap_ptr:
             heap_data.extend(b'\x00' * 4096)
         
-        # Write header
+        # Write header - offset is in words, write at byte position
         def write_uint(offset: int, value: int):
-            struct.pack_into('<I', heap_data, table_ptr + offset * 4, value)
+            struct.pack_into('<I', heap_data, table_byte_offset + offset * 4, value)
         
         write_uint(self.TABLE_OFF_CAPACITY, capacity)
         write_uint(self.TABLE_OFF_COUNT, len(data))
@@ -834,7 +836,7 @@ class Context:
                 entry_offset = self.TABLE_OFF_ENTRIES + slot * self.ENTRY_SIZE_WORDS
                 
                 # Check if slot is empty (key.type == TYPE_NIL)
-                slot_type = struct.unpack_from('<I', heap_data, table_ptr + entry_offset * 4)[0]
+                slot_type = struct.unpack_from('<I', heap_data, table_byte_offset + entry_offset * 4)[0]
                 if slot_type == 0:  # Empty slot
                     # Write key
                     write_uint(entry_offset + 0, key_type)
@@ -846,7 +848,9 @@ class Context:
                     write_uint(entry_offset + 5, val_data)
                     break
         
-        return table_ptr, new_heap_ptr
+        # Return table pointer as WORD index (byte offset / 4)
+        table_ptr_words = table_byte_offset // 4
+        return table_ptr_words, new_heap_ptr
     
     def _python_to_xvalue_parts(self, value: Any, heap_data: bytearray, 
                                  heap_ptr: int) -> Tuple[int, Any]:
@@ -1073,9 +1077,17 @@ class Context:
             print(f"Synced {len(self._entities)} entities from GPU")
     
     def _gpu_table_to_dict(self, heap_data: bytes, table_ptr: int) -> Dict[str, Any]:
-        """Convert GPU heap table to Python dict."""
+        """Convert GPU heap table to Python dict.
+        
+        Args:
+            heap_data: Raw heap bytes
+            table_ptr: Table pointer as WORD index (matching Slang's g_heapMemory[ptr])
+        """
+        # Convert word index to byte offset
+        table_byte_offset = table_ptr * 4
+        
         def read_uint(offset: int) -> int:
-            return struct.unpack_from('<I', heap_data, table_ptr + offset * 4)[0]
+            return struct.unpack_from('<I', heap_data, table_byte_offset + offset * 4)[0]
         
         capacity = read_uint(self.TABLE_OFF_CAPACITY)
         count = read_uint(self.TABLE_OFF_COUNT)
@@ -1573,9 +1585,7 @@ class Context:
             "g_spawnedEntityIds": self._gpu_spawned_entity_ids,
             # GC buffer
             "g_gcState": self._gpu_gc_state,
-            # String pool buffers
-            "g_stringPool": self._gpu_string_pool,
-            "g_stringPoolState": self._gpu_string_pool_state,
+            # String buffers (string.slang uses g_stringData, g_stringHashTable, g_stringState)
             "g_stringData": self._gpu_string_data,
             "g_stringHashTable": self._gpu_string_hash_table,
             "g_stringState": self._gpu_string_state,
