@@ -92,7 +92,7 @@ XScript implements a **stack-based bytecode VM entirely in Slang compute shaders
 - **GPU Spawning** - Create entities on GPU, no sync
 - **GPU Filtering** - Component checks run on GPU
 - **Lua-like** - Dynamic types, metatables, C-style syntax
-- **Python API** - Easy host integration via SlangPy
+- **Python API** - Easy host integration
 
 ## License
 
