@@ -14,6 +14,9 @@ XScript is a GPU-native scripting language for games with:
 - **Reference Counting GC**: Deterministic memory management
 - **C-Style Syntax**: Familiar syntax for developers
 
+## Slang And Slangpy Reference
+Use SlangGuide.md and SlangPyGuide.md 
+
 ## Directory Structure
 
 ```
