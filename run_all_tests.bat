@@ -6,27 +6,32 @@ echo.
 
 cd /d "%~dp0"
 
-echo [1/5] Running Entity GPU Tests...
+echo [1/6] Running Compiler Tests...
+python -m pytest tests/test_compiler.py -v
+if %ERRORLEVEL% NEQ 0 goto :error
+
+echo.
+echo [2/6] Running Entity GPU Tests...
 python -m pytest tests/test_entity_gpu.py -v
 if %ERRORLEVEL% NEQ 0 goto :error
 
 echo.
-echo [2/5] Running Spawn GPU Tests...
+echo [3/6] Running Spawn GPU Tests...
 python -m pytest tests/test_spawn_gpu.py -v
 if %ERRORLEVEL% NEQ 0 goto :error
 
 echo.
-echo [3/5] Running Dispatch GPU Tests...
+echo [4/6] Running Dispatch GPU Tests...
 python -m pytest tests/test_dispatch_gpu.py -v
 if %ERRORLEVEL% NEQ 0 goto :error
 
 echo.
-echo [4/5] Running GC GPU Tests...
+echo [5/6] Running GC GPU Tests...
 python -m pytest tests/test_gc_gpu.py -v
 if %ERRORLEVEL% NEQ 0 goto :error
 
 echo.
-echo [5/5] Running VM GPU Tests...
+echo [6/6] Running VM GPU Tests...
 python -m pytest tests/test_vm_gpu.py -v
 if %ERRORLEVEL% NEQ 0 goto :error
 

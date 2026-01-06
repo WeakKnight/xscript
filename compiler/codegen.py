@@ -303,8 +303,43 @@ class CodeGenerator(ASTVisitor):
         """Generate code for grouped expression."""
         node.expression.accept(self)
     
+    # ECS builtin functions that emit special opcodes
+    ECS_BUILTINS: Dict[str, Tuple[OpCode, int]] = {
+        # name: (opcode, expected_arg_count)
+        "spawn": (OpCode.SPAWN_ENTITY, 1),       # spawn(table) -> entity_id
+        "destroy": (OpCode.DESTROY_ENTITY, 1),   # destroy(entity_id)
+        "get_entity": (OpCode.GET_ENTITY, 0),    # get_entity() -> entity table
+        "get_entity_id": (OpCode.GET_ENTITY_ID, 0),  # get_entity_id() -> entity id
+        "has_component": (OpCode.HAS_COMPONENT, 2),  # has_component(entity, key) -> bool
+        "add_component": (OpCode.ADD_COMPONENT, 3),  # add_component(entity, key, value)
+        "remove_component": (OpCode.REMOVE_COMPONENT, 2),  # remove_component(entity, key)
+    }
+    
     def visit_call(self, node: CallExpr) -> None:
         """Generate code for function call."""
+        # Check for ECS builtin functions
+        if isinstance(node.callee, IdentifierExpr):
+            func_name = node.callee.name
+            if func_name in self.ECS_BUILTINS:
+                opcode, expected_args = self.ECS_BUILTINS[func_name]
+                
+                # Validate argument count
+                if len(node.arguments) != expected_args:
+                    raise CompileError(
+                        f"ECS builtin '{func_name}' expects {expected_args} argument(s), "
+                        f"got {len(node.arguments)}",
+                        node.paren.line
+                    )
+                
+                # Generate arguments (pushed in order)
+                for arg in node.arguments:
+                    arg.accept(self)
+                
+                # Emit ECS opcode
+                self.bytecode.emit(opcode, node.paren.line)
+                return
+        
+        # Regular function call
         # Generate callee
         node.callee.accept(self)
         

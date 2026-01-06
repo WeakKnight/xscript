@@ -75,6 +75,15 @@ class OpCode(IntEnum):
     SET_META = 0x71
     INVOKE_META = 0x72   # operand: meta index (u8), arg count (u8)
     
+    # ECS operations
+    SPAWN_ENTITY = 0x80      # Pop table, push entity ID
+    DESTROY_ENTITY = 0x81    # Pop entity ID, mark for destruction
+    GET_ENTITY = 0x82        # Push current dispatch entity table
+    GET_ENTITY_ID = 0x83     # Push current dispatch entity ID
+    HAS_COMPONENT = 0x84     # Pop key, pop entity, push bool
+    ADD_COMPONENT = 0x85     # Pop value, pop key, pop entity
+    REMOVE_COMPONENT = 0x86  # Pop key, pop entity
+    
     # Special
     HALT = 0xFF
 
@@ -127,6 +136,13 @@ OPCODE_SIZES = {
     OpCode.GET_META: 1,
     OpCode.SET_META: 1,
     OpCode.INVOKE_META: 3,
+    OpCode.SPAWN_ENTITY: 1,
+    OpCode.DESTROY_ENTITY: 1,
+    OpCode.GET_ENTITY: 1,
+    OpCode.GET_ENTITY_ID: 1,
+    OpCode.HAS_COMPONENT: 1,
+    OpCode.ADD_COMPONENT: 1,
+    OpCode.REMOVE_COMPONENT: 1,
     OpCode.HALT: 1,
 }
 
