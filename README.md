@@ -1,14 +1,77 @@
 # XScript
 
-**XScript** is a GPU-accelerated scripting language designed for game development. It combines the flexibility of Lua with the performance of GPU compute shaders.
+**XScript** is a GPU-accelerated scripting language designed for game development. It combines the flexibility of Lua with the performance of GPU compute shaders, featuring native **SIMT/ECS** support for massively parallel game logic.
 
 ## Features
 
 - **GPU-Powered VM**: Virtual machine runs on GPU via Slang/HLSL
+- **Native SIMT/ECS**: First-class Entity-Component-System support with parallel dispatch
+- **GPU-Side Entity Spawning**: Create entities directly from GPU scripts
 - **Lua-Like Design**: Dynamic typing, metatables, and familiar semantics
 - **C-Style Syntax**: Familiar syntax for most developers
 - **Python API**: Easy integration via SlangPy
 - **Reference Counting GC**: Deterministic memory management
+
+## GPU ECS: The Core Advantage
+
+XScript's most powerful feature is its native **SIMT (Single Instruction Multiple Threads)** programming model that maps directly to **ECS (Entity-Component-System)** game architecture:
+
+| ECS Concept | XScript Mapping | Benefit |
+|-------------|-----------------|---------|
+| **Entity** | Table | Each table is a game entity |
+| **Component** | Key (field name) | Fields are components |
+| **System** | Dispatch | Parallel execution on GPU |
+
+### Why This Matters
+
+Traditional game scripting runs sequentially on CPU. XScript runs your game logic **in parallel on thousands of GPU threads**:
+
+```python
+import xscript as xs
+
+ctx = xs.Context(device="cuda")
+
+# Compile a movement system
+systems = ctx.compile('''
+    func movement_update(entity, dt) {
+        entity.position.x = entity.position.x + entity.velocity.x * dt;
+        entity.position.y = entity.position.y + entity.velocity.y * dt;
+    }
+''')
+
+# Spawn 10,000 entities
+for i in range(10000):
+    ctx.spawn({
+        "position": {"x": i * 2.0, "y": 0.0},
+        "velocity": {"x": 1.0, "y": 0.5}
+    })
+
+# Execute on ALL entities in parallel (single GPU dispatch)
+movable = ctx.filter("position", "velocity")
+ctx.dispatch(systems, "movement_update", movable, dt=0.016)
+```
+
+### GPU-Side Entity Spawning
+
+Entities can be created directly from GPU scripts - no CPU round-trip needed:
+
+```c
+// XScript: Spawn bullets directly on GPU
+func weapon_fire(entity, dt) {
+    if (entity.cooldown <= 0) {
+        // spawn_entity() runs on GPU, no CPU sync required
+        spawn_entity({
+            position: entity.position,
+            velocity: { x: entity.aim.x * 50, y: entity.aim.y * 50 },
+            damage: entity.weapon_damage,
+            lifetime: 2.0
+        });
+        entity.cooldown = 0.1;
+    }
+}
+```
+
+For detailed documentation, see [SIMTProgrammingModel.md](SIMTProgrammingModel.md).
 
 ## Quick Start
 
@@ -113,10 +176,13 @@ xscript/
 │   ├── lexer.py        # Tokenization
 │   ├── parser.py       # Parsing
 │   └── codegen.py      # Bytecode generation
-├── runtime/            # Slang VM
+├── runtime/            # Slang VM (GPU)
 │   ├── vm.slang        # Virtual machine
 │   ├── value.slang     # Type system
-│   └── table.slang     # Table implementation
+│   ├── table.slang     # Table implementation
+│   ├── entity.slang    # ECS entity pool
+│   ├── spawn.slang     # GPU spawn buffer
+│   └── dispatch.slang  # System dispatch kernel
 ├── api/                # Python API
 │   ├── context.py      # Script context
 │   └── types.py        # Type wrappers
@@ -130,13 +196,18 @@ xscript/
 │                  Python Host                         │
 ├─────────────────────────────────────────────────────┤
 │  Context API  │  Compiler  │  Type Conversion       │
+│  spawn()  │  filter()  │  dispatch()  │  commit()   │
 └───────────────┴────────────┴────────────────────────┘
                         │
                         ▼
 ┌─────────────────────────────────────────────────────┐
-│                GPU Runtime (Slang)                   │
+│             GPU Runtime (Slang/SIMT)                 │
 ├─────────────────────────────────────────────────────┤
-│  Stack VM  │  Value System  │  GC  │  Tables        │
+│  ECS Layer:  Entity Pool  │  Spawn Buffer  │  Query │
+├─────────────────────────────────────────────────────┤
+│  VM Layer:   Stack VM  │  Value System  │  GC       │
+├─────────────────────────────────────────────────────┤
+│  Data Layer: Tables  │  Heap  │  String Pool        │
 └────────────┴────────────────┴──────┴────────────────┘
 ```
 

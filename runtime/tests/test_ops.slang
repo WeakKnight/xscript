@@ -761,3 +761,108 @@ void run_all_ops_tests() {
     }
 }
 
+// =============================================================================
+// ECS Operations Tests
+// =============================================================================
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_ecs_ops() {
+    uint passed = 0;
+    uint failed = 0;
+    
+    // Test 1: Set and get current entity
+    {
+        uint testEntityId = 12345;
+        uint testTablePtr = 67890;
+        
+        vm_set_current_entity(testEntityId, testTablePtr);
+        
+        uint gotId = vm_get_current_entity_id();
+        XValue gotEntity = vm_get_current_entity();
+        
+        if (gotId == testEntityId && gotEntity.type == TYPE_TABLE && gotEntity.asUint() == testTablePtr) {
+            passed++;
+        } else {
+            failed++;
+        }
+        
+        vm_clear_current_entity();
+    }
+    
+    // Test 2: Clear current entity
+    {
+        vm_set_current_entity(100, 200);
+        vm_clear_current_entity();
+        
+        uint gotId = vm_get_current_entity_id();
+        XValue gotEntity = vm_get_current_entity();
+        
+        if (gotId == 0xFFFFFFFF && gotEntity.isNil()) {
+            passed++;
+        } else {
+            failed++;
+        }
+    }
+    
+    // Test 3: has_component with nil entity returns false
+    {
+        XValue nilEntity = XValue::nil();
+        XValue key = XValue::string(100);  // Some string index
+        
+        bool hasComp = vm_has_component(nilEntity, key);
+        
+        if (!hasComp) {
+            passed++;
+        } else {
+            failed++;
+        }
+    }
+    
+    // Test 4: has_component with non-table returns false
+    {
+        XValue numValue = XValue::number(42.0f);
+        XValue key = XValue::string(100);
+        
+        bool hasComp = vm_has_component(numValue, key);
+        
+        if (!hasComp) {
+            passed++;
+        } else {
+            failed++;
+        }
+    }
+    
+    // Test 5: add_component with nil entity returns false
+    {
+        XValue nilEntity = XValue::nil();
+        XValue key = XValue::string(100);
+        XValue value = XValue::number(42.0f);
+        
+        bool added = vm_add_component(nilEntity, key, value);
+        
+        if (!added) {
+            passed++;
+        } else {
+            failed++;
+        }
+    }
+    
+    // Test 6: remove_component with nil entity returns false
+    {
+        XValue nilEntity = XValue::nil();
+        XValue key = XValue::string(100);
+        
+        bool removed = vm_remove_component(nilEntity, key);
+        
+        if (!removed) {
+            passed++;
+        } else {
+            failed++;
+        }
+    }
+    
+    g_testResults[0] = passed;
+    g_testResults[1] = failed;
+}
+

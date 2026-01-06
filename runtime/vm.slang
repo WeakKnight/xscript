@@ -42,6 +42,26 @@ RWStructuredBuffer<XValue> g_hostCallArgs;
 RWStructuredBuffer<XValue> g_hostCallResults;
 
 // =============================================================================
+// ECS Buffers (from entity.slang, spawn.slang, dispatch.slang)
+// =============================================================================
+
+// Entity dispatch list (entity IDs to process)
+RWStructuredBuffer<uint> g_dispatchEntityList;
+
+// Dispatch state (from dispatch.slang)
+struct DispatchState {
+    uint processedCount;
+    uint skippedCount;
+    uint errorCount;
+    uint spawnCount;
+    uint destroyCount;
+    uint status;
+    uint padding0;
+    uint padding1;
+};
+RWStructuredBuffer<DispatchState> g_dispatchState;
+
+// =============================================================================
 // Bytecode Reading
 // =============================================================================
 
@@ -446,6 +466,82 @@ void vm_step(inout VMState state, uint vmIndex) {
             xvalue_decref(b);
             break;
             
+        // ===== ECS Operations =====
+        case OP_SPAWN_ENTITY:
+            // Pop table, spawn entity via spawn buffer, push pending spawn ID
+            vm_pop(state, a);  // table to spawn
+            if (a.type == TYPE_TABLE) {
+                uint spawnId = spawn_entity_gpu(a.asUint(), vm_get_current_entity_id(), vmIndex);
+                vm_push(state, XValue::number(float(spawnId)));
+            } else {
+                state.status = VM_STATUS_ERROR;
+                state.error = ERR_TYPE_ERROR;
+            }
+            break;
+            
+        case OP_DESTROY_ENTITY:
+            // Pop entity ID, mark for destruction
+            vm_pop(state, a);
+            if (a.type == TYPE_NUMBER) {
+                uint entityId = uint(a.asNumber());
+                entity_destroy(entityId);
+            }
+            // Destroying current entity is also valid
+            else if (a.type == TYPE_TABLE) {
+                // If passed a table, destroy current entity
+                uint currentId = vm_get_current_entity_id();
+                if (currentId != 0xFFFFFFFF) {
+                    entity_destroy(currentId);
+                }
+            }
+            break;
+            
+        case OP_GET_ENTITY:
+            // Push current dispatch entity table
+            result = vm_get_current_entity();
+            xvalue_incref(result);
+            vm_push(state, result);
+            break;
+            
+        case OP_GET_ENTITY_ID:
+            // Push current dispatch entity ID as number
+            {
+                uint currentId = vm_get_current_entity_id();
+                vm_push(state, XValue::number(float(currentId)));
+            }
+            break;
+            
+        case OP_HAS_COMPONENT:
+            // Pop key, pop entity, push bool
+            vm_pop(state, b);  // key
+            vm_pop(state, a);  // entity table
+            {
+                bool hasComp = vm_has_component(a, b);
+                vm_push(state, XValue::boolean(hasComp));
+            }
+            xvalue_decref(a);
+            xvalue_decref(b);
+            break;
+            
+        case OP_ADD_COMPONENT:
+            // Pop value, pop key, pop entity
+            vm_pop(state, result);  // value
+            vm_pop(state, b);       // key
+            vm_pop(state, a);       // entity table
+            vm_add_component(a, b, result);
+            xvalue_decref(a);
+            xvalue_decref(b);
+            break;
+            
+        case OP_REMOVE_COMPONENT:
+            // Pop key, pop entity
+            vm_pop(state, b);  // key
+            vm_pop(state, a);  // entity table
+            vm_remove_component(a, b);
+            xvalue_decref(a);
+            xvalue_decref(b);
+            break;
+            
         // ===== Special =====
         case OP_HALT:
             state.status = VM_STATUS_COMPLETED;
@@ -545,6 +641,72 @@ void xscript_init(uniform uint heapSize,
     string_pool_init(stringPoolSize);
     gc_init();
     
+    // Initialize ECS subsystems
+    entity_pool_init();
+    spawn_buffer_init();
+    
     // Clear host call count
     g_hostCallCount[0] = 0;
+}
+
+// =============================================================================
+// ECS System Execution
+// =============================================================================
+
+// Execute VM for ECS system dispatch (entity is pre-set)
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void vm_execute_system(
+    uint3 threadId : SV_DispatchThreadID,
+    uniform uint entityCount,
+    uniform uint entryPoint,
+    uniform uint maxSteps,
+    uniform float dt
+) {
+    uint entityIndex = threadId.x;
+    
+    if (entityIndex >= entityCount) return;
+    
+    // Get entity from dispatch list
+    uint entityId = g_dispatchEntityList[entityIndex];
+    uint tablePtr = entity_get_table_ptr(entityId);
+    
+    if (tablePtr == 0) return;  // Invalid entity
+    
+    // Set current entity for ECS operations
+    vm_set_current_entity(entityId, tablePtr);
+    
+    // Initialize VM state for this thread
+    VMState state;
+    for (uint i = 0; i < VM_STACK_SIZE; i++) {
+        state.stack[i] = XValue::nil();
+    }
+    
+    state.sp = 0;
+    state.fp = 0;
+    state.pc = entryPoint;
+    state.status = VM_STATUS_RUNNING;
+    state.error = ERR_NONE;
+    
+    // Push entity table and dt as arguments
+    vm_push(state, XValue::table(tablePtr));
+    vm_push(state, XValue::number(dt));
+    
+    // Execute VM
+    for (uint step = 0; step < maxSteps; step++) {
+        if (state.status != VM_STATUS_RUNNING) {
+            break;
+        }
+        vm_step(state, entityIndex);
+    }
+    
+    // Clear current entity
+    vm_clear_current_entity();
+    
+    // Update dispatch stats
+    if (state.status == VM_STATUS_COMPLETED || state.status == VM_STATUS_RUNNING) {
+        InterlockedAdd(g_dispatchState[0].processedCount, 1);
+    } else if (state.status == VM_STATUS_ERROR) {
+        InterlockedAdd(g_dispatchState[0].errorCount, 1);
+    }
 }

@@ -67,6 +67,15 @@ static const uint OP_GET_META    = 0x70;
 static const uint OP_SET_META    = 0x71;
 static const uint OP_INVOKE_META = 0x72;
 
+// ECS operations
+static const uint OP_SPAWN_ENTITY     = 0x80;  // Pop table, spawn entity, push entity ID
+static const uint OP_DESTROY_ENTITY   = 0x81;  // Pop entity ID, mark for destruction
+static const uint OP_GET_ENTITY       = 0x82;  // Push current dispatch entity table
+static const uint OP_GET_ENTITY_ID    = 0x83;  // Push current dispatch entity ID
+static const uint OP_HAS_COMPONENT    = 0x84;  // Pop key, pop entity, push bool
+static const uint OP_ADD_COMPONENT    = 0x85;  // Pop value, pop key, pop entity
+static const uint OP_REMOVE_COMPONENT = 0x86;  // Pop key, pop entity
+
 // Special
 static const uint OP_HALT  = 0xFF;
 
@@ -367,4 +376,74 @@ bool vm_return(inout VMState state, uint returnCount,
     state.pc = frame.returnPC;
     
     return true;
+}
+
+// =============================================================================
+// ECS Operations
+// =============================================================================
+
+// Current dispatch entity (set by dispatch kernel before executing VM)
+// These are global state used during ECS dispatch
+static uint g_currentEntityId = 0xFFFFFFFF;
+static uint g_currentEntityTablePtr = 0;
+
+// Set current dispatch entity (called by dispatch kernel)
+void vm_set_current_entity(uint entityId, uint tablePtr) {
+    g_currentEntityId = entityId;
+    g_currentEntityTablePtr = tablePtr;
+}
+
+// Clear current dispatch entity
+void vm_clear_current_entity() {
+    g_currentEntityId = 0xFFFFFFFF;
+    g_currentEntityTablePtr = 0;
+}
+
+// Get current dispatch entity table
+XValue vm_get_current_entity() {
+    if (g_currentEntityTablePtr == 0) {
+        return XValue::nil();
+    }
+    return XValue::table(g_currentEntityTablePtr);
+}
+
+// Get current dispatch entity ID
+uint vm_get_current_entity_id() {
+    return g_currentEntityId;
+}
+
+// Check if entity table has a component (key)
+// entity: entity table XValue
+// key: component name (string XValue)
+// Returns true if the key exists and value is not nil
+bool vm_has_component(XValue entity, XValue key) {
+    if (entity.type != TYPE_TABLE) {
+        return false;
+    }
+    
+    XValue value = table_get(entity, key);
+    return !value.isNil();
+}
+
+// Add component to entity
+// entity: entity table XValue
+// key: component name (string XValue)
+// value: component value
+bool vm_add_component(XValue entity, XValue key, XValue value) {
+    if (entity.type != TYPE_TABLE || key.isNil()) {
+        return false;
+    }
+    
+    return table_set(entity, key, value);
+}
+
+// Remove component from entity (set to nil)
+// entity: entity table XValue
+// key: component name (string XValue)
+bool vm_remove_component(XValue entity, XValue key) {
+    if (entity.type != TYPE_TABLE) {
+        return false;
+    }
+    
+    return table_set(entity, key, XValue::nil());
 }
