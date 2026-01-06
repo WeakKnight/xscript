@@ -50,13 +50,49 @@ func weapon_fire(entity, dt) {
 }
 ```
 
+## GPU VM Architecture
+
+XScript implements a **stack-based bytecode VM entirely in Slang compute shaders**:
+
+```
+┌─────────────────────────────────────────────────────┐
+│  GPU Dispatch (1 thread = 1 entity)                 │
+├─────────────────────────────────────────────────────┤
+│  Thread 0    │  Thread 1    │  Thread 2    │ ...    │
+│  VMState[0]  │  VMState[1]  │  VMState[2]  │        │
+│  - stack     │  - stack     │  - stack     │        │
+│  - pc        │  - pc        │  - pc        │        │
+│  - sp/fp     │  - sp/fp     │  - sp/fp     │        │
+├─────────────────────────────────────────────────────┤
+│  Shared: bytecode, constants, heap, entity pool     │
+└─────────────────────────────────────────────────────┘
+```
+
+**Key Design:**
+
+| Feature | Implementation |
+|---------|----------------|
+| **Per-thread VM state** | Each entity gets isolated stack, pc, registers |
+| **Shared heap** | Tables/objects in GPU memory, atomic allocations |
+| **32-bit XValue** | Tagged union: nil, bool, number(f32), string, table, function |
+| **Bytecode interpreter** | ~40 opcodes, Lua-like semantics |
+| **GPU-side filtering** | `table_get` lookups for component checks |
+
+**Why not compile to native shaders?**
+
+- Dynamic typing (table keys determined at runtime)
+- GPU spawning (entity count changes during dispatch)
+- Metatables & operator overloading
+- Same bytecode runs on CPU or GPU
+
 ## Features
 
 - **GPU VM** - Slang/HLSL compute shader runtime
-- **SIMT/ECS** - Native parallel entity processing
+- **SIMT/ECS** - Native parallel entity processing  
 - **GPU Spawning** - Create entities on GPU, no sync
+- **GPU Filtering** - Component checks run on GPU
 - **Lua-like** - Dynamic types, metatables, C-style syntax
-- **Python API** - Easy host integration
+- **Python API** - Easy host integration via SlangPy
 
 ## License
 
