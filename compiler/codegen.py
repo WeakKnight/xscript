@@ -60,9 +60,16 @@ class Scope:
     
     def resolve_local(self, name: str) -> Optional[int]:
         """Resolve a local variable, returning its slot or None."""
+        # Check current scope's locals
         for local in reversed(self.locals):
             if local.name == name:
                 return local.slot
+        
+        # For non-function scopes, also check parent scopes
+        # (since they share the same local slot space)
+        if self.parent is not None and not self.is_function:
+            return self.parent.resolve_local(name)
+        
         return None
     
     def resolve_upvalue(self, name: str) -> Optional[int]:
@@ -410,9 +417,12 @@ class CodeGenerator(ASTVisitor):
             self.bytecode.emit(OpCode.SET_TABLE, line)
         
         elif isinstance(node.target, DotExpr):
-            node.target.object.accept(self)
+            # Stack before: [value, value]
+            # Need: [value, table, value] for SET_FIELD (pops value, pops table)
+            node.target.object.accept(self)  # Stack: [value, value, table]
+            self.bytecode.emit(OpCode.SWAP, line)  # Stack: [value, table, value]
             idx = self.bytecode.add_constant(Constant.string(node.target.name.lexeme))
-            self.bytecode.emit_with_u16(OpCode.SET_FIELD, idx, line)
+            self.bytecode.emit_with_u16(OpCode.SET_FIELD, idx, line)  # Pops value, pops table
     
     def visit_table(self, node: TableExpr) -> None:
         """Generate code for table literal."""
@@ -514,7 +524,10 @@ class CodeGenerator(ASTVisitor):
         line = node.name.line
         func_name = node.name.lexeme
         
-        # Record start position
+        # Emit jump to skip over function body
+        jump_offset = self.bytecode.emit_with_i16(OpCode.JMP, 0, line)
+        
+        # Record start position (after the jump)
         func_start = self.bytecode.current_offset()
         
         # Begin function scope
@@ -537,6 +550,10 @@ class CodeGenerator(ASTVisitor):
         upvalue_count = len(self.scope.upvalues)
         
         self.end_scope()
+        
+        # Patch the jump to skip to here
+        jump_target = func_end - (jump_offset + 3)  # +3 for the JMP instruction size
+        self.bytecode.patch_i16(jump_offset + 1, jump_target)
         
         # Add function info
         func_idx = len(self.bytecode.functions)

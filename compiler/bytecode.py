@@ -296,6 +296,25 @@ class Bytecode:
         self.code[offset + 1] = jump & 0xFF
         self.code[offset + 2] = (jump >> 8) & 0xFF
     
+    def patch_i16(self, offset: int, value: int) -> None:
+        """Patch a 16-bit signed integer at the given offset."""
+        if value > 0x7FFF or value < -0x8000:
+            raise ValueError("Value too large for i16")
+        
+        if value < 0:
+            value = value + 0x10000
+        
+        self.code[offset] = value & 0xFF
+        self.code[offset + 1] = (value >> 8) & 0xFF
+    
+    def emit_with_i16(self, opcode: OpCode, value: int, line: int = 0) -> int:
+        """Emit an instruction with a signed 16-bit operand."""
+        offset = self.emit(opcode, line)
+        if value < 0:
+            value = value + 0x10000
+        self.emit_u16(value)
+        return offset
+    
     def current_offset(self) -> int:
         """Get the current code offset."""
         return len(self.code)

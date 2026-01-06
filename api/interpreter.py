@@ -39,6 +39,8 @@ class Interpreter:
         self.pc = 0
         self.call_stack: List[CallFrame] = []
         self.bytecode: Optional[Bytecode] = None
+        self._current_entity: Optional[XTable] = None
+        self._current_entity_id: int = 0
     
     def run(self, bytecode: Bytecode) -> XValue:
         """
@@ -424,4 +426,67 @@ class Interpreter:
         if a.type == TYPE_NIL:
             return True
         return a.data == b.data
+    
+    def set_current_entity(self, entity: XTable, entity_id: int = 0) -> None:
+        """
+        Set the current entity for ECS operations.
+        
+        Args:
+            entity: Entity table
+            entity_id: Entity ID
+        """
+        self._current_entity = entity
+        self._current_entity_id = entity_id
+    
+    def call_function(self, func_name: str, args: List[XValue]) -> XValue:
+        """
+        Call a function by name with arguments.
+        
+        Args:
+            func_name: Name of the function to call
+            args: List of XValue arguments
+            
+        Returns:
+            Return value from function
+        """
+        # Get function from globals
+        func = self.context.get_global(func_name)
+        if func.is_nil():
+            raise NameError(f"Function '{func_name}' not defined")
+        
+        if func.type != TYPE_FUNCTION:
+            raise TypeError(f"'{func_name}' is not a function")
+        
+        func_obj = func.data
+        if isinstance(func_obj, XFunction):
+            if func_obj.is_host:
+                # Call host function
+                py_args = [arg.to_python() for arg in args]
+                result = func_obj.host_func(*py_args)
+                return XValue.from_python(result)
+            else:
+                # For script functions, we need to execute the function
+                # Push function and args onto stack
+                self.push(func)
+                for arg in args:
+                    self.push(arg)
+                
+                # Create call frame
+                frame = CallFrame(
+                    return_pc=len(self.bytecode.code),  # Return to end
+                    base_slot=len(self.stack) - len(args) - 1,
+                    func_name=func_obj.name
+                )
+                self.call_stack.append(frame)
+                self.pc = func_obj.code_offset
+                
+                # Execute until return
+                while self.call_stack:
+                    result = self.step()
+                    if result is not None:
+                        return result
+                
+                return self.pop() if self.stack else XValue.nil()
+        
+        return XValue.nil()
 

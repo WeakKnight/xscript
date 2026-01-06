@@ -4,12 +4,42 @@ XScript Context
 The main interface for compiling and executing XScript code.
 """
 
-from typing import Any, Dict, List, Optional, Callable, Union
+from typing import Any, Dict, List, Optional, Callable, Union, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
 
-from .types import XValue, XTable, XFunction, TYPE_FUNCTION
+from .types import XValue, XTable, XFunction, TYPE_FUNCTION, TYPE_TABLE
+
+
+@dataclass
+class Filter:
+    """
+    Entity filter for dispatch operations.
+    
+    Filters entities by required component keys.
+    """
+    keys: Tuple[str, ...]
+    _context: 'Context' = field(repr=False)
+    
+    def matches(self, entity: Optional[Dict[str, Any]]) -> bool:
+        """Check if an entity matches this filter."""
+        if entity is None:
+            return False
+        for key in self.keys:
+            if key not in entity:
+                return False
+        return True
+
+
+@dataclass
+class DispatchStats:
+    """Statistics from a dispatch operation."""
+    processed: int = 0
+    skipped: int = 0
+    errors: int = 0
+    spawned: int = 0
+    destroyed: int = 0
 
 # Import compiler
 import sys
@@ -93,6 +123,11 @@ class Context:
         # GPU buffers (will be initialized on first use)
         self._initialized = False
         self._slang_module = None
+        
+        # ECS entity storage (CPU-side for now)
+        self._entities: Dict[int, XTable] = {}
+        self._next_entity_id: int = 0
+        self._entity_generation: Dict[int, int] = {}  # index -> generation
         
         # Register built-in functions
         self._register_builtins()
@@ -199,7 +234,27 @@ class Context:
         from .interpreter import Interpreter
         
         interp = Interpreter(self)
-        return interp.run(script.bytecode)
+        result = interp.run(script.bytecode)
+        
+        # Register all functions from bytecode after execution
+        # (this overwrites the number indices with proper XFunction objects)
+        self._register_script_functions(script.bytecode)
+        
+        return result
+    
+    def _register_script_functions(self, bytecode: 'Bytecode') -> None:
+        """Register script functions from bytecode as globals."""
+        from .types import XFunction
+        
+        for func_info in bytecode.functions:
+            xfunc = XFunction(
+                name=func_info.name,
+                arity=func_info.arity,
+                is_host=False,
+                host_func=None,
+                code_offset=func_info.code_offset
+            )
+            self._globals[func_info.name] = XValue(TYPE_FUNCTION, xfunc)
     
     def _execute_gpu(self, script: Script) -> XValue:
         """Execute script on GPU via SlangPy."""
@@ -397,6 +452,169 @@ class Context:
             XValue
         """
         return XValue.from_python(value)
+    
+    # =========================================================================
+    # ECS Methods
+    # =========================================================================
+    
+    def spawn(self, data: Dict[str, Any]) -> int:
+        """
+        Spawn a new entity with the given component data.
+        
+        Args:
+            data: Dictionary of component data
+            
+        Returns:
+            Entity ID
+        """
+        # Create entity table from data
+        table = XTable.from_dict(data)
+        
+        # Allocate entity ID
+        entity_id = self._next_entity_id
+        self._next_entity_id += 1
+        
+        # Store entity
+        self._entities[entity_id] = table
+        self._entity_generation[entity_id] = 0
+        
+        return entity_id
+    
+    def get_entity(self, entity_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get entity data by ID.
+        
+        Args:
+            entity_id: Entity ID
+            
+        Returns:
+            Entity data as dictionary, or None if not found
+        """
+        table = self._entities.get(entity_id)
+        if table is None:
+            return None
+        return table.to_dict()
+    
+    def destroy(self, entity_id: int) -> None:
+        """
+        Destroy an entity.
+        
+        Args:
+            entity_id: Entity ID to destroy
+        """
+        if entity_id in self._entities:
+            del self._entities[entity_id]
+            # Increment generation to invalidate old handles
+            self._entity_generation[entity_id] = self._entity_generation.get(entity_id, 0) + 1
+    
+    def entity_count(self) -> int:
+        """
+        Get the number of active entities.
+        
+        Returns:
+            Number of entities
+        """
+        return len(self._entities)
+    
+    def filter(self, *keys: str) -> Filter:
+        """
+        Create an entity filter for dispatch operations.
+        
+        Args:
+            *keys: Component keys to filter by
+            
+        Returns:
+            Filter object
+        """
+        return Filter(keys=keys, _context=self)
+    
+    def dispatch(self, script: Script, func_name: str, 
+                 entity_filter: Filter, **kwargs) -> DispatchStats:
+        """
+        Dispatch a system function to all matching entities.
+        
+        Args:
+            script: Compiled script containing the function
+            func_name: Name of the function to call
+            entity_filter: Filter specifying which entities to process
+            **kwargs: Additional arguments (e.g., dt=0.016)
+            
+        Returns:
+            DispatchStats with execution statistics
+        """
+        # Execute the script first to define functions
+        self.execute(script)
+        
+        # Get the function from globals
+        func = self.get_global(func_name)
+        if func.is_nil():
+            raise NameError(f"Function '{func_name}' not defined")
+        
+        if func.type != TYPE_FUNCTION:
+            raise TypeError(f"'{func_name}' is not a function")
+        
+        stats = DispatchStats()
+        dt = kwargs.get('dt', 0.0)
+        
+        # Process each entity
+        for entity_id, table in list(self._entities.items()):
+            entity_dict = table.to_dict()
+            
+            # Check filter
+            if not entity_filter.matches(entity_dict):
+                stats.skipped += 1
+                continue
+            
+            # Execute function on entity (CPU mode for now)
+            try:
+                self._execute_system_on_entity(script, func_name, table, dt)
+                stats.processed += 1
+            except Exception as e:
+                stats.errors += 1
+                if self.debug:
+                    print(f"Error processing entity {entity_id}: {e}")
+        
+        return stats
+    
+    def _execute_system_on_entity(self, script: Script, func_name: str, 
+                                   entity: XTable, dt: float) -> None:
+        """Execute a system function on a single entity."""
+        from .interpreter import Interpreter
+        
+        # Create interpreter with entity context
+        interp = Interpreter(self)
+        interp.set_current_entity(entity)
+        interp.bytecode = script.bytecode
+        
+        # Get the function - it should be in globals after compile
+        func = self.get_global(func_name)
+        if func.is_nil() or func.type != TYPE_FUNCTION:
+            raise NameError(f"Function '{func_name}' not defined")
+        
+        func_obj = func.data
+        
+        # Call the function with entity and dt as arguments
+        # The function modifies entity in-place
+        entity_val = entity.to_xvalue()
+        dt_val = XValue.number(dt)
+        
+        if func_obj.is_host:
+            # Host function - call directly
+            func_obj.host_func(entity.to_dict(), dt)
+        else:
+            # Script function - set up call and execute
+            interp.stack = [entity_val, dt_val]
+            interp.pc = func_obj.code_offset
+            
+            # Execute function body
+            try:
+                while interp.pc < len(script.bytecode.code):
+                    result = interp.step()
+                    if result is not None:
+                        break
+            except Exception as e:
+                if self.debug:
+                    print(f"Error in system function: {e}")
 
 
 # Convenience functions
