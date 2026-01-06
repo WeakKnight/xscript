@@ -1,6 +1,8 @@
 // XScript Entity Pool (32-bit)
 // Entity storage and ID management for ECS-style operations
 
+import value;
+
 // =============================================================================
 // Constants
 // =============================================================================

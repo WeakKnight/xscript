@@ -1,6 +1,15 @@
 // XScript Virtual Machine (32-bit)
 // Core VM implementation
 
+import value;
+import ops;
+import table;
+import heap;
+import entity;
+import gc;
+import string;
+import spawn;
+
 // =============================================================================
 // VM Buffers
 // =============================================================================
@@ -40,26 +49,6 @@ RWStructuredBuffer<uint> g_hostCallCount;
 // Host call arguments and results
 RWStructuredBuffer<XValue> g_hostCallArgs;
 RWStructuredBuffer<XValue> g_hostCallResults;
-
-// =============================================================================
-// ECS Buffers (from entity.slang, spawn.slang, dispatch.slang)
-// =============================================================================
-
-// Entity dispatch list (entity IDs to process)
-RWStructuredBuffer<uint> g_dispatchEntityList;
-
-// Dispatch state (from dispatch.slang)
-struct DispatchState {
-    uint processedCount;
-    uint skippedCount;
-    uint errorCount;
-    uint spawnCount;
-    uint destroyCount;
-    uint status;
-    uint padding0;
-    uint padding1;
-};
-RWStructuredBuffer<DispatchState> g_dispatchState;
 
 // =============================================================================
 // Bytecode Reading
@@ -650,63 +639,5 @@ void xscript_init(uniform uint heapSize,
 }
 
 // =============================================================================
-// ECS System Execution
+// NOTE: ECS System Execution is now in dispatch.slang
 // =============================================================================
-
-// Execute VM for ECS system dispatch (entity is pre-set)
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void vm_execute_system(
-    uint3 threadId : SV_DispatchThreadID,
-    uniform uint entityCount,
-    uniform uint entryPoint,
-    uniform uint maxSteps,
-    uniform float dt
-) {
-    uint entityIndex = threadId.x;
-    
-    if (entityIndex >= entityCount) return;
-    
-    // Get entity from dispatch list
-    uint entityId = g_dispatchEntityList[entityIndex];
-    uint tablePtr = entity_get_table_ptr(entityId);
-    
-    if (tablePtr == 0) return;  // Invalid entity
-    
-    // Set current entity for ECS operations
-    vm_set_current_entity(entityId, tablePtr);
-    
-    // Initialize VM state for this thread
-    VMState state;
-    for (uint i = 0; i < VM_STACK_SIZE; i++) {
-        state.stack[i] = XValue::nil();
-    }
-    
-    state.sp = 0;
-    state.fp = 0;
-    state.pc = entryPoint;
-    state.status = VM_STATUS_RUNNING;
-    state.error = ERR_NONE;
-    
-    // Push entity table and dt as arguments
-    vm_push(state, XValue::table(tablePtr));
-    vm_push(state, XValue::number(dt));
-    
-    // Execute VM
-    for (uint step = 0; step < maxSteps; step++) {
-        if (state.status != VM_STATUS_RUNNING) {
-            break;
-        }
-        vm_step(state, entityIndex);
-    }
-    
-    // Clear current entity
-    vm_clear_current_entity();
-    
-    // Update dispatch stats
-    if (state.status == VM_STATUS_COMPLETED || state.status == VM_STATUS_RUNNING) {
-        InterlockedAdd(g_dispatchState[0].processedCount, 1);
-    } else if (state.status == VM_STATUS_ERROR) {
-        InterlockedAdd(g_dispatchState[0].errorCount, 1);
-    }
-}

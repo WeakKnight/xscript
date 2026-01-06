@@ -93,8 +93,10 @@ static const uint VM_STATUS_WAITING_HOST = 2;
 static const uint VM_STATUS_ERROR        = 3;
 static const uint VM_STATUS_COMPLETED    = 4;
 
-static const uint VM_STACK_SIZE = 256;
-static const uint VM_CALL_STACK_SIZE = 64;
+// Stack size limited to fit within shader structured buffer element size (2048 bytes)
+// Stack: 160 XValues * 12 bytes = 1920 bytes, leaving room for sp, fp, pc, status, error
+static const uint VM_STACK_SIZE = 160;
+static const uint VM_CALL_STACK_SIZE = 32;
 
 struct VMState {
     XValue stack[VM_STACK_SIZE];
@@ -259,22 +261,35 @@ XValue vm_table_get(XValue t, XValue key) {
         return XValue::nil();
     }
     
-    XValue result = table_get(t, key);
-    
-    // If not found and has __index metamethod, use it
-    if (result.isNil()) {
-        XValue indexMeta = table_getmetamethod(t, META_INDEX);
-        if (!indexMeta.isNil()) {
-            // If __index is a table, look up in it
-            if (indexMeta.type == TYPE_TABLE) {
-                return vm_table_get(indexMeta, key);
-            }
-            // If __index is a function, caller should invoke it
-            // Return the metamethod for caller to handle
+    // Iterative lookup with metatable chain (max 8 levels to prevent infinite loops)
+    XValue currentTable = t;
+    for (uint depth = 0; depth < 8; depth++) {
+        XValue result = table_get(currentTable, key);
+        
+        // Found value, return it
+        if (!result.isNil()) {
+            return result;
         }
+        
+        // Check for __index metamethod
+        XValue indexMeta = table_getmetamethod(currentTable, META_INDEX);
+        if (indexMeta.isNil()) {
+            // No more tables to search
+            return XValue::nil();
+        }
+        
+        // If __index is a table, continue lookup in it
+        if (indexMeta.type == TYPE_TABLE) {
+            currentTable = indexMeta;
+            continue;
+        }
+        
+        // If __index is a function, caller should invoke it
+        // For now, return nil
+        return XValue::nil();
     }
     
-    return result;
+    return XValue::nil();
 }
 
 bool vm_table_set(XValue t, XValue key, XValue value) {

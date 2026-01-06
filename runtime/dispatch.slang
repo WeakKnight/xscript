@@ -1,6 +1,13 @@
 // XScript ECS Dispatch (32-bit)
 // System dispatch kernel for parallel entity processing
 
+import value;
+import ops;
+import table;
+import entity;
+import spawn;
+import vm;
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -165,16 +172,44 @@ void system_dispatch(
     // Set current entity for ECS operations in VM
     vm_set_current_entity(entityId, tablePtr);
     
-    // Execute system function
-    // In a full implementation, this would:
-    // 1. Create a VM state for this thread
-    // 2. Push the entity table and dt as arguments
-    // 3. Call the function at config.functionIndex
-    // 4. Handle any errors
+    // Execute system function using per-thread VM state
+    uint vmIndex = entityIndex;
     
-    // For now, mark as processed
-    InterlockedAdd(g_dispatchState[0].processedCount, 1);
-    g_dispatchResults[entityIndex] = 1;  // Processed
+    // Initialize VM state for this call
+    VMState vm;
+    vm.sp = 0;
+    vm.fp = 0;
+    vm.status = VM_STATUS_RUNNING;
+    vm.error = ERR_NONE;
+    
+    // Get function descriptor
+    FunctionDescriptor func = g_functions[config.functionIndex];
+    vm.pc = func.codeOffset;
+    
+    // Push arguments: entity table, then dt
+    vm.stack[vm.sp++] = entityTable;
+    vm.stack[vm.sp++] = XValue::number(config.dt);
+    
+    // Execute VM until completion or error
+    uint maxSteps = 10000;  // Prevent infinite loops
+    uint stepCount = 0;
+    
+    while (vm.status == VM_STATUS_RUNNING && stepCount < maxSteps) {
+        vm_step(vm, vmIndex);
+        stepCount++;
+    }
+    
+    // Handle result
+    if (vm.status == VM_STATUS_COMPLETED || vm.status == VM_STATUS_RUNNING) {
+        InterlockedAdd(g_dispatchState[0].processedCount, 1);
+        g_dispatchResults[entityIndex] = 1;  // Processed successfully
+    } else {
+        InterlockedAdd(g_dispatchState[0].errorCount, 1);
+        g_dispatchResults[entityIndex] = vm.error;  // Store error code
+    }
+    
+    // Write back VM state (for debugging if needed)
+    g_vmStates[vmIndex] = vm;
     
     // Clear current entity
     vm_clear_current_entity();

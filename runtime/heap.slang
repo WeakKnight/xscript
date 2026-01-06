@@ -79,14 +79,24 @@ uint get_free_list_head(uint sizeClass) {
     }
 }
 
-// Set free list head for size class
-void set_free_list_head(uint sizeClass, uint value) {
+// Set free list head for size class (returns old head)
+uint set_free_list_head(uint sizeClass, uint newHead) {
+    uint oldHead;
     switch (sizeClass) {
-        case 0: g_heapState[0].freeListSmall = value; break;
-        case 1: g_heapState[0].freeListMedium = value; break;
-        case 2: g_heapState[0].freeListLarge = value; break;
-        default: g_heapState[0].freeListHuge = value; break;
+        case 0: 
+            InterlockedExchange(g_heapState[0].freeListSmall, newHead, oldHead);
+            break;
+        case 1: 
+            InterlockedExchange(g_heapState[0].freeListMedium, newHead, oldHead);
+            break;
+        case 2: 
+            InterlockedExchange(g_heapState[0].freeListLarge, newHead, oldHead);
+            break;
+        default: 
+            InterlockedExchange(g_heapState[0].freeListHuge, newHead, oldHead);
+            break;
     }
+    return oldHead;
 }
 
 // Read block header
@@ -128,8 +138,8 @@ uint heap_alloc(uint size) {
         // Pop from free list
         HeapBlockHeader header = read_block_header(freeListHead);
         
-        uint oldHead;
-        InterlockedExchange(g_heapState[0].freeListSmall + sizeClass, header.next, oldHead);
+        // Update free list head atomically
+        set_free_list_head(sizeClass, header.next);
         
         // Update header
         header.refCount = 1;
@@ -181,9 +191,8 @@ void heap_free(uint ptr) {
     // Mark as free
     header.flags = BLOCK_FLAG_FREE;
     
-    // Add to free list
-    uint oldHead;
-    InterlockedExchange(g_heapState[0].freeListSmall + sizeClass, blockOffset, oldHead);
+    // Add to free list atomically
+    uint oldHead = set_free_list_head(sizeClass, blockOffset);
     header.next = oldHead;
     
     write_block_header(blockOffset, header);
