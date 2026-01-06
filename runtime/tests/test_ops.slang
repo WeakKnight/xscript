@@ -67,9 +67,83 @@ struct XValue {
         return v;
     }
     
+    static XValue string(uint stringIndex) {
+        XValue v;
+        v.type = TYPE_STRING;
+        v.flags = 0;
+        v.data = stringIndex;
+        return v;
+    }
+    
+    static XValue table(uint heapOffset) {
+        XValue v;
+        v.type = TYPE_TABLE;
+        v.flags = 0;
+        v.data = heapOffset;
+        return v;
+    }
+    
     bool isNil() { return type == TYPE_NIL; }
     float asNumber() { return asfloat(data); }
+    uint asUint() { return data; }
 };
+
+// =============================================================================
+// ECS Helper State and Functions (for testing)
+// =============================================================================
+
+// Mock current entity state (thread-local in practice, static for single-threaded tests)
+static uint g_testCurrentEntityId = 0xFFFFFFFF;
+static uint g_testCurrentEntityTablePtr = 0;
+
+void vm_set_current_entity(uint entityId, uint tablePtr) {
+    g_testCurrentEntityId = entityId;
+    g_testCurrentEntityTablePtr = tablePtr;
+}
+
+void vm_clear_current_entity() {
+    g_testCurrentEntityId = 0xFFFFFFFF;
+    g_testCurrentEntityTablePtr = 0;
+}
+
+XValue vm_get_current_entity() {
+    if (g_testCurrentEntityTablePtr == 0) {
+        return XValue::nil();
+    }
+    return XValue::table(g_testCurrentEntityTablePtr);
+}
+
+uint vm_get_current_entity_id() {
+    return g_testCurrentEntityId;
+}
+
+// Simplified component check for testing (always returns false - no real table access)
+bool vm_has_component(XValue entity, XValue key) {
+    if (entity.type != TYPE_TABLE) {
+        return false;
+    }
+    // In real impl, would look up key in table
+    // For testing, we just check that entity is a valid table
+    return false;  // Simplified: no actual table lookup
+}
+
+// Simplified component add for testing
+bool vm_add_component(XValue entity, XValue key, XValue value) {
+    if (entity.type != TYPE_TABLE || key.isNil()) {
+        return false;
+    }
+    // In real impl, would add to table
+    return true;  // Simplified: always succeed for valid inputs
+}
+
+// Simplified component remove for testing
+bool vm_remove_component(XValue entity, XValue key) {
+    if (entity.type != TYPE_TABLE) {
+        return false;
+    }
+    // In real impl, would remove from table
+    return true;  // Simplified: always succeed for valid inputs
+}
 
 // =============================================================================
 // XValue Arithmetic (from value.slang)
@@ -681,6 +755,172 @@ void test_nested_frame_restore() {
 }
 
 // =============================================================================
+// Function Call Variants Tests (440-449)
+// =============================================================================
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_call_zero_args() {
+    // Test: Simulate calling a function with 0 arguments
+    VMState state;
+    state.sp = 0;
+    state.fp = 0;
+    state.status = VM_STATUS_RUNNING;
+    state.error = 0;
+    
+    // Save caller state
+    uint callerFP = state.fp;
+    uint callerPC = 100;  // Simulated return address
+    
+    // Set up new frame with 0 args
+    state.fp = state.sp;  // fp = sp = 0
+    
+    // Function body: push return value
+    vm_push(state, XValue::number(42.0f));
+    
+    // Return: restore state
+    XValue retVal;
+    vm_pop(state, retVal);
+    state.fp = callerFP;
+    
+    bool passed = (retVal.asNumber() == 42.0f) && (state.sp == 0) && (state.fp == 0);
+    report_ops_test(440, passed, 42.0f, retVal.asNumber());
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_call_many_args() {
+    // Test: Simulate calling a function with 8 arguments
+    VMState state;
+    state.sp = 0;
+    state.fp = 0;
+    state.status = VM_STATUS_RUNNING;
+    state.error = 0;
+    
+    // Push 8 arguments
+    for (uint i = 0; i < 8; i++) {
+        vm_push(state, XValue::number(float(i + 1)));  // 1, 2, 3, ..., 8
+    }
+    
+    // Set up call frame
+    CallFrame frame;
+    frame.returnPC = 50;
+    frame.prevFP = state.fp;
+    frame.localBase = state.sp - 8;  // Base where args start
+    frame.argCount = 8;
+    
+    // New frame pointer at first arg
+    state.fp = state.sp - 8;
+    
+    // Access all 8 args
+    float sum = 0.0f;
+    for (uint i = 0; i < 8; i++) {
+        XValue arg = vm_get_local(state, i);
+        sum += arg.asNumber();
+    }
+    
+    // Expected sum: 1+2+3+4+5+6+7+8 = 36
+    bool passed = (sum == 36.0f) && (state.sp == 8);
+    report_ops_test(441, passed, 36.0f, sum);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_call_nested_simulated() {
+    // Test: Simulate nested function calls f(g(x))
+    VMState state;
+    state.sp = 0;
+    state.fp = 0;
+    state.status = VM_STATUS_RUNNING;
+    state.error = 0;
+    
+    // Push argument for g: 5
+    vm_push(state, XValue::number(5.0f));
+    
+    // "Call" g(x): g doubles its input
+    state.fp = state.sp - 1;  // fp points to arg
+    XValue gArg = vm_get_local(state, 0);  // Get arg (5)
+    
+    // g's return value = arg * 2 = 10
+    XValue gResult = XValue::number(gArg.asNumber() * 2.0f);
+    
+    // "Return" from g: replace arg with result
+    state.sp = state.fp;
+    vm_push(state, gResult);
+    
+    // Now "call" f with g's result: f adds 7
+    state.fp = state.sp - 1;
+    XValue fArg = vm_get_local(state, 0);  // Get arg (10)
+    
+    // f's return value = arg + 7 = 17
+    XValue fResult = XValue::number(fArg.asNumber() + 7.0f);
+    
+    // "Return" from f
+    state.sp = state.fp;
+    vm_push(state, fResult);
+    
+    // Final result should be 17
+    bool passed = (state.sp == 1) && (state.stack[0].asNumber() == 17.0f);
+    report_ops_test(442, passed, 17.0f, state.stack[0].asNumber());
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_return_multiple_values() {
+    // Test: Simulate returning multiple values
+    VMState state;
+    state.sp = 0;
+    state.fp = 0;
+    state.status = VM_STATUS_RUNNING;
+    state.error = 0;
+    
+    // Set up function that returns 3 values
+    state.fp = 0;
+    
+    // Push 3 return values
+    vm_push(state, XValue::number(10.0f));
+    vm_push(state, XValue::number(20.0f));
+    vm_push(state, XValue::number(30.0f));
+    
+    // Verify all 3 values are on stack
+    bool passed = (state.sp == 3) &&
+                  (state.stack[0].asNumber() == 10.0f) &&
+                  (state.stack[1].asNumber() == 20.0f) &&
+                  (state.stack[2].asNumber() == 30.0f);
+    report_ops_test(443, passed, 3.0f, float(state.sp));
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_deep_call_stack() {
+    // Test: Simulate deeply nested calls (5 levels)
+    VMState state;
+    state.sp = 0;
+    state.fp = 0;
+    state.status = VM_STATUS_RUNNING;
+    state.error = 0;
+    
+    // Simulate 5 nested call frames
+    uint framePointers[5];
+    
+    for (uint i = 0; i < 5; i++) {
+        // Push an argument
+        vm_push(state, XValue::number(float(i)));
+        framePointers[i] = state.fp;
+        state.fp = state.sp - 1;
+        // Push a local
+        vm_push(state, XValue::number(float(i) * 10.0f));
+    }
+    
+    // sp should be 10 (5 args + 5 locals)
+    // Verify deepest frame's local
+    XValue deepLocal = vm_get_local(state, 1);  // Local at slot 1 in current frame
+    
+    bool passed = (state.sp == 10) && (deepLocal.asNumber() == 40.0f);  // Frame 4's local
+    report_ops_test(444, passed, 40.0f, deepLocal.asNumber());
+}
+
+// =============================================================================
 // Run All Tests
 // =============================================================================
 
@@ -762,31 +1002,114 @@ void run_all_ops_tests() {
 }
 
 // =============================================================================
-// ECS Operations Tests
+// ECS Operations Tests (450-459)
 // =============================================================================
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
+void test_ecs_set_get_entity() {
+    // Test: Set and get current entity
+    uint testEntityId = 12345;
+    uint testTablePtr = 67890;
+    
+    vm_set_current_entity(testEntityId, testTablePtr);
+    
+    uint gotId = vm_get_current_entity_id();
+    XValue gotEntity = vm_get_current_entity();
+    
+    bool passed = (gotId == testEntityId) && 
+                  (gotEntity.type == TYPE_TABLE) && 
+                  (gotEntity.asUint() == testTablePtr);
+    
+    vm_clear_current_entity();
+    
+    report_ops_test(450, passed, float(testEntityId), float(gotId));
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_ecs_clear_entity() {
+    // Test: Clear current entity
+    vm_set_current_entity(100, 200);
+    vm_clear_current_entity();
+    
+    uint gotId = vm_get_current_entity_id();
+    XValue gotEntity = vm_get_current_entity();
+    
+    bool passed = (gotId == 0xFFFFFFFF) && gotEntity.isNil();
+    
+    report_ops_test(451, passed, 0xFFFFFFFF, float(gotId));
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_ecs_has_component_nil() {
+    // Test: has_component with nil entity returns false
+    XValue nilEntity = XValue::nil();
+    XValue key = XValue::string(100);
+    
+    bool hasComp = vm_has_component(nilEntity, key);
+    
+    bool passed = !hasComp;
+    report_ops_test(452, passed, 0.0f, hasComp ? 1.0f : 0.0f);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_ecs_has_component_non_table() {
+    // Test: has_component with non-table returns false
+    XValue numValue = XValue::number(42.0f);
+    XValue key = XValue::string(100);
+    
+    bool hasComp = vm_has_component(numValue, key);
+    
+    bool passed = !hasComp;
+    report_ops_test(453, passed, 0.0f, hasComp ? 1.0f : 0.0f);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_ecs_add_component_nil() {
+    // Test: add_component with nil entity returns false
+    XValue nilEntity = XValue::nil();
+    XValue key = XValue::string(100);
+    XValue value = XValue::number(42.0f);
+    
+    bool added = vm_add_component(nilEntity, key, value);
+    
+    bool passed = !added;
+    report_ops_test(454, passed, 0.0f, added ? 1.0f : 0.0f);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void test_ecs_remove_component_nil() {
+    // Test: remove_component with nil entity returns false
+    XValue nilEntity = XValue::nil();
+    XValue key = XValue::string(100);
+    
+    bool removed = vm_remove_component(nilEntity, key);
+    
+    bool passed = !removed;
+    report_ops_test(455, passed, 0.0f, removed ? 1.0f : 0.0f);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
 void test_ecs_ops() {
-    uint passed = 0;
-    uint failed = 0;
+    // Combined test for ECS operations - reports total passed/failed count
+    uint passCount = 0;
     
     // Test 1: Set and get current entity
     {
         uint testEntityId = 12345;
         uint testTablePtr = 67890;
-        
         vm_set_current_entity(testEntityId, testTablePtr);
-        
         uint gotId = vm_get_current_entity_id();
         XValue gotEntity = vm_get_current_entity();
-        
         if (gotId == testEntityId && gotEntity.type == TYPE_TABLE && gotEntity.asUint() == testTablePtr) {
-            passed++;
-        } else {
-            failed++;
+            passCount++;
         }
-        
         vm_clear_current_entity();
     }
     
@@ -794,28 +1117,19 @@ void test_ecs_ops() {
     {
         vm_set_current_entity(100, 200);
         vm_clear_current_entity();
-        
         uint gotId = vm_get_current_entity_id();
         XValue gotEntity = vm_get_current_entity();
-        
         if (gotId == 0xFFFFFFFF && gotEntity.isNil()) {
-            passed++;
-        } else {
-            failed++;
+            passCount++;
         }
     }
     
-    // Test 3: has_component with nil entity returns false
+    // Test 3: has_component with nil returns false
     {
         XValue nilEntity = XValue::nil();
-        XValue key = XValue::string(100);  // Some string index
-        
-        bool hasComp = vm_has_component(nilEntity, key);
-        
-        if (!hasComp) {
-            passed++;
-        } else {
-            failed++;
+        XValue key = XValue::string(100);
+        if (!vm_has_component(nilEntity, key)) {
+            passCount++;
         }
     }
     
@@ -823,46 +1137,32 @@ void test_ecs_ops() {
     {
         XValue numValue = XValue::number(42.0f);
         XValue key = XValue::string(100);
-        
-        bool hasComp = vm_has_component(numValue, key);
-        
-        if (!hasComp) {
-            passed++;
-        } else {
-            failed++;
+        if (!vm_has_component(numValue, key)) {
+            passCount++;
         }
     }
     
-    // Test 5: add_component with nil entity returns false
+    // Test 5: add_component with nil returns false
     {
         XValue nilEntity = XValue::nil();
         XValue key = XValue::string(100);
         XValue value = XValue::number(42.0f);
-        
-        bool added = vm_add_component(nilEntity, key, value);
-        
-        if (!added) {
-            passed++;
-        } else {
-            failed++;
+        if (!vm_add_component(nilEntity, key, value)) {
+            passCount++;
         }
     }
     
-    // Test 6: remove_component with nil entity returns false
+    // Test 6: remove_component with nil returns false
     {
         XValue nilEntity = XValue::nil();
         XValue key = XValue::string(100);
-        
-        bool removed = vm_remove_component(nilEntity, key);
-        
-        if (!removed) {
-            passed++;
-        } else {
-            failed++;
+        if (!vm_remove_component(nilEntity, key)) {
+            passCount++;
         }
     }
     
-    g_testResults[0] = passed;
-    g_testResults[1] = failed;
+    // Report: all 6 tests should pass
+    bool allPassed = (passCount == 6);
+    report_ops_test(456, allPassed, 6.0f, float(passCount));
 }
 

@@ -1041,6 +1041,50 @@ class TestVMGPU:
     # Negation test
     def test_negation(self, vm_runner):
         vm_runner.run_test("test_negation")
+    
+    # Control flow tests (310-319)
+    def test_jmp_forward(self, vm_runner):
+        vm_runner.run_test("test_jmp_forward")
+    
+    def test_jmp_backward(self, vm_runner):
+        vm_runner.run_test("test_jmp_backward")
+    
+    def test_jmp_if_true(self, vm_runner):
+        vm_runner.run_test("test_jmp_if_true")
+    
+    def test_jmp_if_false(self, vm_runner):
+        vm_runner.run_test("test_jmp_if_false")
+    
+    def test_jmp_if_not_true(self, vm_runner):
+        vm_runner.run_test("test_jmp_if_not_true")
+    
+    def test_jmp_if_not_false(self, vm_runner):
+        vm_runner.run_test("test_jmp_if_not_false")
+    
+    def test_jmp_if_nil(self, vm_runner):
+        vm_runner.run_test("test_jmp_if_nil")
+    
+    def test_nested_conditionals(self, vm_runner):
+        vm_runner.run_test("test_nested_conditionals")
+    
+    # Error handling tests (320-329)
+    def test_stack_underflow(self, vm_runner):
+        vm_runner.run_test("test_stack_underflow")
+    
+    def test_stack_overflow(self, vm_runner):
+        vm_runner.run_test("test_stack_overflow")
+    
+    def test_invalid_opcode(self, vm_runner):
+        vm_runner.run_test("test_invalid_opcode")
+    
+    def test_div_by_zero(self, vm_runner):
+        vm_runner.run_test("test_div_by_zero")
+    
+    def test_add_underflow(self, vm_runner):
+        vm_runner.run_test("test_add_underflow")
+    
+    def test_type_error_arithmetic(self, vm_runner):
+        vm_runner.run_test("test_type_error_arithmetic")
 
 
 # =============================================================================
@@ -1119,6 +1163,44 @@ class TestOpsGPU:
     
     def test_nested_frame_restore(self, ops_runner):
         ops_runner.run_test("test_nested_frame_restore")
+    
+    # Function call variants (440-449)
+    def test_call_zero_args(self, ops_runner):
+        ops_runner.run_test("test_call_zero_args")
+    
+    def test_call_many_args(self, ops_runner):
+        ops_runner.run_test("test_call_many_args")
+    
+    def test_call_nested_simulated(self, ops_runner):
+        ops_runner.run_test("test_call_nested_simulated")
+    
+    def test_return_multiple_values(self, ops_runner):
+        ops_runner.run_test("test_return_multiple_values")
+    
+    def test_deep_call_stack(self, ops_runner):
+        ops_runner.run_test("test_deep_call_stack")
+    
+    # ECS operations tests (450-459)
+    def test_ecs_set_get_entity(self, ops_runner):
+        ops_runner.run_test("test_ecs_set_get_entity")
+    
+    def test_ecs_clear_entity(self, ops_runner):
+        ops_runner.run_test("test_ecs_clear_entity")
+    
+    def test_ecs_has_component_nil(self, ops_runner):
+        ops_runner.run_test("test_ecs_has_component_nil")
+    
+    def test_ecs_has_component_non_table(self, ops_runner):
+        ops_runner.run_test("test_ecs_has_component_non_table")
+    
+    def test_ecs_add_component_nil(self, ops_runner):
+        ops_runner.run_test("test_ecs_add_component_nil")
+    
+    def test_ecs_remove_component_nil(self, ops_runner):
+        ops_runner.run_test("test_ecs_remove_component_nil")
+    
+    def test_ecs_ops(self, ops_runner):
+        ops_runner.run_test("test_ecs_ops")
 
 
 # =============================================================================

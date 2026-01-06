@@ -276,15 +276,21 @@ void test_dispatch_config() {
     uint passed = 0;
     uint failed = 0;
     
-    // Set up dispatch configuration
+    // Set up dispatch configuration - initialize ALL fields to avoid undefined values
     DispatchConfig config;
     config.functionIndex = 42;
     config.entityCount = 1000;
     config.requiredKeyCount = 2;
+    // Initialize all array elements to avoid undefined UAV writes
+    for (uint i = 0; i < DISPATCH_MAX_REQUIRED_KEYS; i++) {
+        config.requiredKeys[i] = 0;
+    }
     config.requiredKeys[0] = 100;  // "position" string index
     config.requiredKeys[1] = 101;  // "velocity" string index
     config.dt = 0.016f;
     config.flags = 0;
+    config.padding0 = 0;
+    config.padding1 = 0;
     
     g_dispatchConfig[0] = config;
     

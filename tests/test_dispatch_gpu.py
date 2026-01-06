@@ -40,8 +40,8 @@ class DispatchTestRunner:
     TEST_RESULTS_SIZE = 256
     
     # DispatchConfig struct: functionIndex, entityCount, requiredKeyCount, 
-    #   requiredKeys[8], dt, flags, padding0, padding1 = 14 uints
-    DISPATCH_CONFIG_SIZE = 14
+    #   requiredKeys[8], dt, flags, padding0, padding1 = 15 uints
+    DISPATCH_CONFIG_SIZE = 15
     
     # DispatchState struct: 8 uints
     DISPATCH_STATE_SIZE = 8
