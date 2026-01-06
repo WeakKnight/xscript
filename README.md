@@ -1,241 +1,63 @@
 # XScript
 
-**XScript** is a GPU-accelerated scripting language designed for game development. It combines the flexibility of Lua with the performance of GPU compute shaders, featuring native **SIMT/ECS** support for massively parallel game logic.
+**GPU-native scripting language with SIMT/ECS for massively parallel game logic.**
 
-## Features
+## Core Advantage
 
-- **GPU-Powered VM**: Virtual machine runs on GPU via Slang/HLSL
-- **Native SIMT/ECS**: First-class Entity-Component-System support with parallel dispatch
-- **GPU-Side Entity Spawning**: Create entities directly from GPU scripts
-- **Lua-Like Design**: Dynamic typing, metatables, and familiar semantics
-- **C-Style Syntax**: Familiar syntax for most developers
-- **Python API**: Easy integration via SlangPy
-- **Reference Counting GC**: Deterministic memory management
+XScript runs game scripts on **GPU compute shaders** using a **SIMT (Single Instruction Multiple Threads)** model that maps directly to **ECS (Entity-Component-System)** architecture:
 
-## GPU ECS: The Core Advantage
+| ECS | XScript | GPU Execution |
+|-----|---------|---------------|
+| Entity | Table | 1 thread per entity |
+| Component | Key | Filter by keys |
+| System | Dispatch | Parallel kernel |
 
-XScript's most powerful feature is its native **SIMT (Single Instruction Multiple Threads)** programming model that maps directly to **ECS (Entity-Component-System)** game architecture:
-
-| ECS Concept | XScript Mapping | Benefit |
-|-------------|-----------------|---------|
-| **Entity** | Table | Each table is a game entity |
-| **Component** | Key (field name) | Fields are components |
-| **System** | Dispatch | Parallel execution on GPU |
-
-### Why This Matters
-
-Traditional game scripting runs sequentially on CPU. XScript runs your game logic **in parallel on thousands of GPU threads**:
+**10,000 entities. One GPU dispatch. All processed in parallel.**
 
 ```python
 import xscript as xs
 
 ctx = xs.Context(device="cuda")
 
-# Compile a movement system
+# Compile system
 systems = ctx.compile('''
-    func movement_update(entity, dt) {
-        entity.position.x = entity.position.x + entity.velocity.x * dt;
-        entity.position.y = entity.position.y + entity.velocity.y * dt;
+    func movement(entity, dt) {
+        entity.position.x += entity.velocity.x * dt;
+        entity.position.y += entity.velocity.y * dt;
     }
 ''')
 
 # Spawn 10,000 entities
 for i in range(10000):
-    ctx.spawn({
-        "position": {"x": i * 2.0, "y": 0.0},
-        "velocity": {"x": 1.0, "y": 0.5}
-    })
+    ctx.spawn({"position": {"x": i, "y": 0}, "velocity": {"x": 1, "y": 0.5}})
 
-# Execute on ALL entities in parallel (single GPU dispatch)
-movable = ctx.filter("position", "velocity")
-ctx.dispatch(systems, "movement_update", movable, dt=0.016)
+# Execute on ALL in parallel
+ctx.dispatch(systems, "movement", ctx.filter("position", "velocity"), dt=0.016)
 ```
 
-### GPU-Side Entity Spawning
-
-Entities can be created directly from GPU scripts - no CPU round-trip needed:
+**GPU-side spawning** - no CPU round-trip:
 
 ```c
-// XScript: Spawn bullets directly on GPU
 func weapon_fire(entity, dt) {
     if (entity.cooldown <= 0) {
-        // spawn_entity() runs on GPU, no CPU sync required
         spawn_entity({
             position: entity.position,
-            velocity: { x: entity.aim.x * 50, y: entity.aim.y * 50 },
-            damage: entity.weapon_damage,
-            lifetime: 2.0
+            velocity: {x: entity.aim.x * 50, y: entity.aim.y * 50},
+            damage: 10
         });
         entity.cooldown = 0.1;
     }
 }
 ```
 
-For detailed documentation, see [SIMTProgrammingModel.md](SIMTProgrammingModel.md).
+## Features
 
-## Quick Start
-
-```python
-import xscript as xs
-
-# Create a context
-ctx = xs.Context()
-
-# Compile and execute script
-script = ctx.compile('''
-    var x = 10;
-    var y = 20;
-    return x + y;
-''')
-
-result = ctx.execute(script)
-print(result)  # 30
-```
-
-## Language Examples
-
-### Variables and Functions
-
-```c
-// Variable declaration
-var x = 10;
-var name = "player";
-
-// Function definition
-func add(a, b) {
-    return a + b;
-}
-
-// Anonymous function
-var multiply = func(a, b) {
-    return a * b;
-};
-```
-
-### Tables and Metatables
-
-```c
-// Create a table
-var player = {
-    name: "Hero",
-    hp: 100,
-    mp: 50
-};
-
-// Access fields
-player.level = 10;
-player["exp"] = 0;
-
-// Metatable for operator overloading
-var VectorMeta = {
-    __add: func(a, b) {
-        return { x: a.x + b.x, y: a.y + b.y };
-    }
-};
-setmetatable(vector, VectorMeta);
-```
-
-### Control Flow
-
-```c
-// If/else
-if (hp > 0) {
-    print("Alive!");
-} else {
-    print("Dead!");
-}
-
-// For loop
-for (var i = 0; i < 10; i += 1) {
-    print(i);
-}
-
-// While loop
-while (running) {
-    update();
-}
-```
-
-## Installation
-
-```bash
-pip install xscript
-```
-
-For GPU support:
-
-```bash
-pip install xscript[gpu]
-```
-
-## Project Structure
-
-```
-xscript/
-├── compiler/           # Python compiler
-│   ├── lexer.py        # Tokenization
-│   ├── parser.py       # Parsing
-│   └── codegen.py      # Bytecode generation
-├── runtime/            # Slang VM (GPU)
-│   ├── vm.slang        # Virtual machine
-│   ├── value.slang     # Type system
-│   ├── table.slang     # Table implementation
-│   ├── entity.slang    # ECS entity pool
-│   ├── spawn.slang     # GPU spawn buffer
-│   └── dispatch.slang  # System dispatch kernel
-├── api/                # Python API
-│   ├── context.py      # Script context
-│   └── types.py        # Type wrappers
-└── examples/           # Example scripts
-```
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│                  Python Host                         │
-├─────────────────────────────────────────────────────┤
-│  Context API  │  Compiler  │  Type Conversion       │
-│  spawn()  │  filter()  │  dispatch()  │  commit()   │
-└───────────────┴────────────┴────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────┐
-│             GPU Runtime (Slang/SIMT)                 │
-├─────────────────────────────────────────────────────┤
-│  ECS Layer:  Entity Pool  │  Spawn Buffer  │  Query │
-├─────────────────────────────────────────────────────┤
-│  VM Layer:   Stack VM  │  Value System  │  GC       │
-├─────────────────────────────────────────────────────┤
-│  Data Layer: Tables  │  Heap  │  String Pool        │
-└────────────┴────────────────┴──────┴────────────────┘
-```
-
-## Host Function Registration
-
-```python
-ctx = xs.Context()
-
-@ctx.register("spawn_enemy")
-def spawn_enemy(enemy_type: str, x: float, y: float):
-    # Python implementation
-    return game.spawn(enemy_type, x, y)
-
-# Now callable from script:
-# spawn_enemy("goblin", 10.0, 20.0);
-```
+- **GPU VM** - Slang/HLSL compute shader runtime
+- **SIMT/ECS** - Native parallel entity processing
+- **GPU Spawning** - Create entities on GPU, no sync
+- **Lua-like** - Dynamic types, metatables, C-style syntax
+- **Python API** - Easy host integration
 
 ## License
 
-MIT License - see LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please read the contributing guidelines first.
-
-## Acknowledgments
-
-- [Slang](https://github.com/shader-slang/slang) - The shader language compiler
-- [SlangPy](https://github.com/shader-slang/slangpy) - Python bindings for Slang
-- Lua - Inspiration for the language design
-
+MIT
