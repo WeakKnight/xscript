@@ -1,0 +1,18 @@
+# XScript Requirements
+
+# Core dependencies
+numpy>=1.20.0
+
+# Optional: GPU support via SlangPy
+# slangpy>=0.1.0
+
+# Development dependencies
+pytest>=6.0
+pytest-cov>=2.0
+black>=22.0
+mypy>=0.900
+
+# Documentation
+# sphinx>=4.0
+# sphinx-rtd-theme>=1.0
+
