@@ -18,6 +18,9 @@ RWStructuredBuffer<GCState> g_gcState;
 // Reference Counting
 // =============================================================================
 
+// Worklist size for iterative decref (avoids recursion on GPU)
+static const uint GC_WORKLIST_SIZE = 32;
+
 // Increment reference count for a value
 void xvalue_incref(inout XValue v) {
     if (v.type < TYPE_STRING) {
@@ -37,64 +40,92 @@ void xvalue_incref(inout XValue v) {
     }
 }
 
-// Decrement reference count for a value
+// Decrement reference count for a value (iterative, GPU-safe)
+// Uses a worklist to avoid recursion when freeing nested tables
 void xvalue_decref(inout XValue v) {
     if (v.type < TYPE_STRING) {
         return;
     }
     
-    bool freed = false;
-    
-    switch (v.type) {
-        case TYPE_STRING:
-            freed = string_decref(v.asUint());
-            break;
-        case TYPE_TABLE:
-            freed = gc_decref_table(v);
-            break;
-        case TYPE_FUNCTION:
-        case TYPE_USERDATA:
-            freed = heap_decref(v.asUint());
-            break;
+    // Handle non-table types directly
+    if (v.type == TYPE_STRING) {
+        bool freed = string_decref(v.asUint());
+        if (freed) {
+            InterlockedAdd(g_gcState[0].totalCollected, 1);
+        }
+        return;
     }
     
-    if (freed) {
-        InterlockedAdd(g_gcState[0].totalCollected, 1);
+    if (v.type != TYPE_TABLE) {
+        bool freed = heap_decref(v.asUint());
+        if (freed) {
+            InterlockedAdd(g_gcState[0].totalCollected, 1);
+        }
+        return;
     }
-}
-
-// Decrement reference count for table (recursive)
-bool gc_decref_table(XValue t) {
-    if (t.type != TYPE_TABLE) return false;
     
-    uint ptr = t.asUint();
-    uint oldCount = heap_get_refcount(ptr);
+    // For tables, use iterative worklist to handle nested tables
+    uint worklist[GC_WORKLIST_SIZE];
+    uint worklistHead = 0;
+    uint worklistTail = 0;
     
-    if (oldCount <= 1) {
-        // About to free - first decref all contained values
-        uint capacity = heap_read_uint(ptr, TABLE_OFF_CAPACITY);
+    // Add initial table to worklist
+    worklist[worklistTail] = v.asUint();
+    worklistTail++;
+    
+    // Process worklist iteratively
+    while (worklistHead < worklistTail) {
+        uint ptr = worklist[worklistHead];
+        worklistHead++;
         
-        for (uint i = 0; i < capacity; i++) {
-            uint entryOffset = TABLE_OFF_ENTRIES + i * ENTRY_SIZE;
+        uint oldCount = heap_get_refcount(ptr);
+        
+        if (oldCount <= 1) {
+            // About to free - collect children first
+            uint capacity = heap_read_uint(ptr, TABLE_OFF_CAPACITY);
             
-            XValue key = read_xvalue(ptr, entryOffset + ENTRY_OFF_KEY);
-            if (!key.isNil()) {
-                xvalue_decref(key);
+            for (uint i = 0; i < capacity && worklistTail < GC_WORKLIST_SIZE; i++) {
+                uint entryOffset = TABLE_OFF_ENTRIES + i * ENTRY_SIZE;
                 
-                XValue value = read_xvalue(ptr, entryOffset + ENTRY_OFF_VALUE);
-                xvalue_decref(value);
+                XValue key = read_xvalue(ptr, entryOffset + ENTRY_OFF_KEY);
+                if (!key.isNil()) {
+                    // Decref key
+                    if (key.type == TYPE_STRING) {
+                        string_decref(key.asUint());
+                    } else if (key.type == TYPE_TABLE && worklistTail < GC_WORKLIST_SIZE) {
+                        worklist[worklistTail] = key.asUint();
+                        worklistTail++;
+                    } else if (key.type >= TYPE_TABLE) {
+                        heap_decref(key.asUint());
+                    }
+                    
+                    // Decref value
+                    XValue value = read_xvalue(ptr, entryOffset + ENTRY_OFF_VALUE);
+                    if (value.type == TYPE_STRING) {
+                        string_decref(value.asUint());
+                    } else if (value.type == TYPE_TABLE && worklistTail < GC_WORKLIST_SIZE) {
+                        worklist[worklistTail] = value.asUint();
+                        worklistTail++;
+                    } else if (value.type >= TYPE_TABLE) {
+                        heap_decref(value.asUint());
+                    }
+                }
+            }
+            
+            // Handle metatable
+            uint mtPtr = heap_read_uint(ptr, TABLE_OFF_METATABLE);
+            if (mtPtr != 0 && worklistTail < GC_WORKLIST_SIZE) {
+                worklist[worklistTail] = mtPtr;
+                worklistTail++;
             }
         }
         
-        // Decref metatable if any
-        uint mtPtr = heap_read_uint(ptr, TABLE_OFF_METATABLE);
-        if (mtPtr != 0) {
-            XValue mt = XValue::table(mtPtr);
-            xvalue_decref(mt);
+        // Now decref the table itself
+        bool freed = heap_decref(ptr);
+        if (freed) {
+            InterlockedAdd(g_gcState[0].totalCollected, 1);
         }
     }
-    
-    return heap_decref(ptr);
 }
 
 // =============================================================================
