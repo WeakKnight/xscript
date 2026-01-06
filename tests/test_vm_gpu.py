@@ -362,6 +362,169 @@ class VMTestRunner(GPUTestRunner):
 
 
 # =============================================================================
+# Ops Test Runner
+# =============================================================================
+
+class OpsTestRunner(GPUTestRunner):
+    """Runner for test_ops.slang tests."""
+    
+    # TestResult struct: uint testId, uint passed, float expected, float actual
+    RESULT_STRUCT_SIZE = 16  # 4 + 4 + 4 + 4 bytes
+    
+    def __init__(self):
+        super().__init__("test_ops.slang")
+        self._create_buffers(self.RESULT_STRUCT_SIZE)
+    
+    def _check_results(self) -> Tuple[bool, str]:
+        """Check ops test results."""
+        count_data = self._count_buffer.to_numpy()
+        count = int(count_data[0])
+        
+        if count == 0:
+            return False, "No test results reported"
+        
+        result_data = self._result_buffer.to_numpy()
+        result_bytes = result_data.tobytes()
+        
+        all_passed = True
+        messages = []
+        
+        for i in range(min(count, self.MAX_RESULTS)):
+            offset = i * self.RESULT_STRUCT_SIZE
+            test_id, passed, expected, actual = struct.unpack_from(
+                'IIff', result_bytes, offset
+            )
+            
+            if passed == 0:
+                all_passed = False
+                messages.append(
+                    f"Test {test_id} FAILED: expected={expected}, actual={actual}"
+                )
+        
+        return all_passed, "; ".join(messages) if messages else "All tests passed"
+    
+    def run_test(self, kernel_name: str) -> None:
+        """Run a single test kernel and assert it passes."""
+        self._count_buffer.copy_from_numpy(np.array([0], dtype=np.uint32))
+        passed, message = self.run_kernel(kernel_name)
+        assert passed, f"GPU test '{kernel_name}' failed: {message}"
+
+
+# =============================================================================
+# Heap Test Runner
+# =============================================================================
+
+class HeapTestRunner(GPUTestRunner):
+    """Runner for test_heap.slang tests.
+    
+    This runner creates additional buffers for heap memory and heap state.
+    """
+    
+    # TestResult struct: uint testId, uint passed, uint expected, uint actual
+    RESULT_STRUCT_SIZE = 16  # 4 + 4 + 4 + 4 bytes
+    
+    # Heap configuration
+    HEAP_SIZE = 16384  # 16384 uints = 64KB heap memory (larger for concurrent tests)
+    HEAP_STATE_SIZE = 32  # HeapAllocator struct = 8 uints = 32 bytes
+    ALLOC_RESULTS_SIZE = 128  # Buffer for storing concurrent allocation results
+    
+    def __init__(self):
+        super().__init__("test_heap.slang")
+        self._create_buffers(self.RESULT_STRUCT_SIZE)
+        self._create_heap_buffers()
+    
+    def _create_heap_buffers(self):
+        """Create GPU buffers for heap memory and state."""
+        # Heap memory buffer (array of uints)
+        self._heap_memory_buffer = self.device.create_buffer(
+            size=self.HEAP_SIZE * 4,  # 4 bytes per uint
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # Heap state buffer (HeapAllocator struct)
+        self._heap_state_buffer = self.device.create_buffer(
+            size=self.HEAP_STATE_SIZE,
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # Alloc results buffer (for concurrent tests)
+        self._alloc_results_buffer = self.device.create_buffer(
+            size=self.ALLOC_RESULTS_SIZE * 4,  # 4 bytes per uint
+            usage=slangpy.BufferUsage.shader_resource | slangpy.BufferUsage.unordered_access
+        )
+        
+        # Initialize buffers to zero
+        self._heap_memory_buffer.copy_from_numpy(np.zeros(self.HEAP_SIZE, dtype=np.uint32))
+        self._heap_state_buffer.copy_from_numpy(np.zeros(8, dtype=np.uint32))
+        self._alloc_results_buffer.copy_from_numpy(np.zeros(self.ALLOC_RESULTS_SIZE, dtype=np.uint32))
+    
+    def run_kernel(self, kernel_name: str, thread_count: Tuple[int, int, int] = (1, 1, 1)) -> Tuple[bool, str]:
+        """Run a compute kernel with heap buffers."""
+        kernel = self._get_kernel(kernel_name)
+        
+        # Dispatch with all 5 buffers
+        kernel.dispatch(
+            thread_count=slangpy.uint3(thread_count[0], thread_count[1], thread_count[2]),
+            vars={
+                "g_testResults": self._result_buffer,
+                "g_testCount": self._count_buffer,
+                "g_heapMemory": self._heap_memory_buffer,
+                "g_heapState": self._heap_state_buffer,
+                "g_allocResults": self._alloc_results_buffer
+            }
+        )
+        
+        return self._check_results()
+    
+    def _check_results(self) -> Tuple[bool, str]:
+        """Check heap test results."""
+        count_data = self._count_buffer.to_numpy()
+        count = int(count_data[0])
+        
+        if count == 0:
+            return False, "No test results reported"
+        
+        result_data = self._result_buffer.to_numpy()
+        result_bytes = result_data.tobytes()
+        
+        all_passed = True
+        messages = []
+        
+        for i in range(min(count, self.MAX_RESULTS)):
+            offset = i * self.RESULT_STRUCT_SIZE
+            test_id, passed, expected, actual = struct.unpack_from(
+                'IIII', result_bytes, offset
+            )
+            
+            if passed == 0:
+                all_passed = False
+                messages.append(
+                    f"Test {test_id} FAILED: expected={expected}, actual={actual}"
+                )
+        
+        return all_passed, "; ".join(messages) if messages else "All tests passed"
+    
+    def _reset_buffers(self):
+        """Reset all buffers before a test."""
+        self._count_buffer.copy_from_numpy(np.array([0], dtype=np.uint32))
+        self._heap_memory_buffer.copy_from_numpy(np.zeros(self.HEAP_SIZE, dtype=np.uint32))
+        self._heap_state_buffer.copy_from_numpy(np.zeros(8, dtype=np.uint32))
+        self._alloc_results_buffer.copy_from_numpy(np.zeros(self.ALLOC_RESULTS_SIZE, dtype=np.uint32))
+    
+    def run_test(self, kernel_name: str) -> None:
+        """Run a single test kernel and assert it passes."""
+        self._reset_buffers()
+        passed, message = self.run_kernel(kernel_name)
+        assert passed, f"GPU test '{kernel_name}' failed: {message}"
+    
+    def run_concurrent_test(self, kernel_name: str, thread_count: Tuple[int, int, int]) -> None:
+        """Run a concurrent test kernel with specified thread count."""
+        self._reset_buffers()
+        passed, message = self.run_kernel(kernel_name, thread_count)
+        assert passed, f"GPU concurrent test '{kernel_name}' failed: {message}"
+
+
+# =============================================================================
 # Pytest Fixtures
 # =============================================================================
 
@@ -387,6 +550,18 @@ def arithmetic_runner():
 def vm_runner():
     """Create a VMTestRunner for the test module."""
     return VMTestRunner()
+
+
+@pytest.fixture(scope="module")
+def ops_runner():
+    """Create an OpsTestRunner for the test module."""
+    return OpsTestRunner()
+
+
+@pytest.fixture(scope="module")
+def heap_runner():
+    """Create a HeapTestRunner for the test module."""
+    return HeapTestRunner()
 
 
 # =============================================================================
@@ -607,6 +782,210 @@ class TestVMGPU:
     # Negation test
     def test_negation(self, vm_runner):
         vm_runner.run_test("test_negation")
+
+
+# =============================================================================
+# Ops Tests (test_ops.slang)
+# =============================================================================
+
+class TestOpsGPU:
+    """GPU tests for extended VM operations from test_ops.slang."""
+    
+    # Local variable tests (400-409)
+    def test_get_local_basic(self, ops_runner):
+        ops_runner.run_test("test_get_local_basic")
+    
+    def test_get_local_with_fp(self, ops_runner):
+        ops_runner.run_test("test_get_local_with_fp")
+    
+    def test_get_local_out_of_bounds(self, ops_runner):
+        ops_runner.run_test("test_get_local_out_of_bounds")
+    
+    def test_set_local_basic(self, ops_runner):
+        ops_runner.run_test("test_set_local_basic")
+    
+    def test_set_local_with_fp(self, ops_runner):
+        ops_runner.run_test("test_set_local_with_fp")
+    
+    # Binary operations - numbers (410-419)
+    def test_binop_add_numbers(self, ops_runner):
+        ops_runner.run_test("test_binop_add_numbers")
+    
+    def test_binop_sub_numbers(self, ops_runner):
+        ops_runner.run_test("test_binop_sub_numbers")
+    
+    def test_binop_mul_numbers(self, ops_runner):
+        ops_runner.run_test("test_binop_mul_numbers")
+    
+    def test_binop_div_numbers(self, ops_runner):
+        ops_runner.run_test("test_binop_div_numbers")
+    
+    def test_binop_div_by_zero(self, ops_runner):
+        ops_runner.run_test("test_binop_div_by_zero")
+    
+    def test_binop_mod_numbers(self, ops_runner):
+        ops_runner.run_test("test_binop_mod_numbers")
+    
+    def test_binop_pow_numbers(self, ops_runner):
+        ops_runner.run_test("test_binop_pow_numbers")
+    
+    # Binary operations - type errors (420-429)
+    def test_binop_add_nil_number(self, ops_runner):
+        ops_runner.run_test("test_binop_add_nil_number")
+    
+    def test_binop_add_bool_number(self, ops_runner):
+        ops_runner.run_test("test_binop_add_bool_number")
+    
+    def test_binop_sub_nil_number(self, ops_runner):
+        ops_runner.run_test("test_binop_sub_nil_number")
+    
+    def test_binop_mul_number_nil(self, ops_runner):
+        ops_runner.run_test("test_binop_mul_number_nil")
+    
+    def test_binop_div_bool_bool(self, ops_runner):
+        ops_runner.run_test("test_binop_div_bool_bool")
+    
+    # Function call tests (430-439)
+    def test_call_frame_setup(self, ops_runner):
+        ops_runner.run_test("test_call_frame_setup")
+    
+    def test_function_descriptor(self, ops_runner):
+        ops_runner.run_test("test_function_descriptor")
+    
+    def test_vm_return_simple(self, ops_runner):
+        ops_runner.run_test("test_vm_return_simple")
+    
+    def test_frame_pointer_mechanics(self, ops_runner):
+        ops_runner.run_test("test_frame_pointer_mechanics")
+    
+    def test_nested_frame_restore(self, ops_runner):
+        ops_runner.run_test("test_nested_frame_restore")
+
+
+# =============================================================================
+# Heap Tests (test_heap.slang)
+# =============================================================================
+
+class TestHeapGPU:
+    """GPU tests for heap memory operations from test_heap.slang."""
+    
+    # Helper function tests (500-509)
+    def test_align_up_basic(self, heap_runner):
+        heap_runner.run_test("test_align_up_basic")
+    
+    def test_align_up_already_aligned(self, heap_runner):
+        heap_runner.run_test("test_align_up_already_aligned")
+    
+    def test_align_up_zero(self, heap_runner):
+        heap_runner.run_test("test_align_up_zero")
+    
+    def test_size_class_small(self, heap_runner):
+        heap_runner.run_test("test_size_class_small")
+    
+    def test_size_class_medium(self, heap_runner):
+        heap_runner.run_test("test_size_class_medium")
+    
+    def test_size_class_large(self, heap_runner):
+        heap_runner.run_test("test_size_class_large")
+    
+    def test_size_class_huge(self, heap_runner):
+        heap_runner.run_test("test_size_class_huge")
+    
+    # Heap initialization tests (510-519)
+    def test_heap_init(self, heap_runner):
+        heap_runner.run_test("test_heap_init")
+    
+    def test_heap_get_stats_after_init(self, heap_runner):
+        heap_runner.run_test("test_heap_get_stats_after_init")
+    
+    # Basic allocation tests (520-529)
+    def test_heap_alloc_single(self, heap_runner):
+        heap_runner.run_test("test_heap_alloc_single")
+    
+    def test_heap_alloc_updates_stats(self, heap_runner):
+        heap_runner.run_test("test_heap_alloc_updates_stats")
+    
+    def test_heap_alloc_multiple(self, heap_runner):
+        heap_runner.run_test("test_heap_alloc_multiple")
+    
+    def test_heap_alloc_sequential(self, heap_runner):
+        heap_runner.run_test("test_heap_alloc_sequential")
+    
+    def test_heap_alloc_fails_when_full(self, heap_runner):
+        heap_runner.run_test("test_heap_alloc_fails_when_full")
+    
+    # Memory access tests (530-539)
+    def test_heap_write_read_uint(self, heap_runner):
+        heap_runner.run_test("test_heap_write_read_uint")
+    
+    def test_heap_write_read_multiple_uint(self, heap_runner):
+        heap_runner.run_test("test_heap_write_read_multiple_uint")
+    
+    def test_heap_write_read_float(self, heap_runner):
+        heap_runner.run_test("test_heap_write_read_float")
+    
+    def test_heap_write_read_negative_float(self, heap_runner):
+        heap_runner.run_test("test_heap_write_read_negative_float")
+    
+    def test_heap_separate_allocations(self, heap_runner):
+        heap_runner.run_test("test_heap_separate_allocations")
+    
+    # Reference counting tests (540-549)
+    def test_heap_initial_refcount(self, heap_runner):
+        heap_runner.run_test("test_heap_initial_refcount")
+    
+    def test_heap_incref(self, heap_runner):
+        heap_runner.run_test("test_heap_incref")
+    
+    def test_heap_incref_multiple(self, heap_runner):
+        heap_runner.run_test("test_heap_incref_multiple")
+    
+    def test_heap_decref_no_free(self, heap_runner):
+        heap_runner.run_test("test_heap_decref_no_free")
+    
+    def test_heap_decref_with_free(self, heap_runner):
+        heap_runner.run_test("test_heap_decref_with_free")
+    
+    def test_heap_get_refcount_null(self, heap_runner):
+        heap_runner.run_test("test_heap_get_refcount_null")
+    
+    # Free and reuse tests (550-559)
+    def test_heap_free(self, heap_runner):
+        heap_runner.run_test("test_heap_free")
+    
+    def test_heap_free_null(self, heap_runner):
+        heap_runner.run_test("test_heap_free_null")
+    
+    def test_heap_block_marked_free(self, heap_runner):
+        heap_runner.run_test("test_heap_block_marked_free")
+    
+    def test_heap_multiple_alloc_free(self, heap_runner):
+        heap_runner.run_test("test_heap_multiple_alloc_free")
+    
+    # Concurrent allocation tests (560-569)
+    def test_concurrent_alloc_32(self, heap_runner):
+        """32 threads concurrently allocating memory."""
+        heap_runner.run_concurrent_test("test_concurrent_alloc_32", (1, 1, 1))
+    
+    def test_concurrent_alloc_64(self, heap_runner):
+        """64 threads concurrently allocating memory."""
+        heap_runner.run_concurrent_test("test_concurrent_alloc_64", (1, 1, 1))
+    
+    def test_concurrent_incref_32(self, heap_runner):
+        """32 threads concurrently incrementing refcount."""
+        heap_runner.run_concurrent_test("test_concurrent_incref_32", (1, 1, 1))
+    
+    def test_concurrent_decref_16(self, heap_runner):
+        """16 threads concurrently decrementing refcount."""
+        heap_runner.run_concurrent_test("test_concurrent_decref_16", (1, 1, 1))
+    
+    def test_concurrent_alloc_multigroup(self, heap_runner):
+        """Multiple thread groups allocating concurrently."""
+        heap_runner.run_concurrent_test("test_concurrent_alloc_multigroup", (4, 1, 1))
+    
+    def test_concurrent_alloc_varying_sizes(self, heap_runner):
+        """16 threads allocating different sizes concurrently."""
+        heap_runner.run_concurrent_test("test_concurrent_alloc_varying_sizes", (1, 1, 1))
 
 
 # =============================================================================
