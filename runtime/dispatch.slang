@@ -175,41 +175,38 @@ void system_dispatch(
     // Execute system function using per-thread VM state
     uint vmIndex = entityIndex;
     
-    // Initialize VM state for this call
-    VMState vm;
-    vm.sp = 0;
-    vm.fp = 0;
-    vm.status = VM_STATUS_RUNNING;
-    vm.error = ERR_NONE;
-    
-    // Get function descriptor
+    // Initialize VM state directly in buffer (avoids large local struct on stack)
+    // Get function descriptor first
     FunctionDescriptor func = g_functions[config.functionIndex];
-    vm.pc = func.codeOffset;
     
-    // Push arguments: entity table, then dt
-    vm.stack[vm.sp++] = entityTable;
-    vm.stack[vm.sp++] = XValue::number(config.dt);
+    // Initialize VM state in buffer
+    g_vmStates[vmIndex].sp = 2;  // Start with 2 elements (entity, dt)
+    g_vmStates[vmIndex].fp = 0;
+    g_vmStates[vmIndex].pc = func.codeOffset;
+    g_vmStates[vmIndex].status = VM_STATUS_RUNNING;
+    g_vmStates[vmIndex].error = ERR_NONE;
+    
+    // Push arguments: entity table, then dt (directly into buffer)
+    g_vmStates[vmIndex].stack[0] = entityTable;
+    g_vmStates[vmIndex].stack[1] = XValue::number(config.dt);
     
     // Execute VM until completion or error
     uint maxSteps = 10000;  // Prevent infinite loops
     uint stepCount = 0;
     
-    while (vm.status == VM_STATUS_RUNNING && stepCount < maxSteps) {
-        vm_step(vm, vmIndex);
+    while (g_vmStates[vmIndex].status == VM_STATUS_RUNNING && stepCount < maxSteps) {
+        vm_step(g_vmStates[vmIndex], vmIndex);
         stepCount++;
     }
     
     // Handle result
-    if (vm.status == VM_STATUS_COMPLETED || vm.status == VM_STATUS_RUNNING) {
+    if (g_vmStates[vmIndex].status == VM_STATUS_COMPLETED || g_vmStates[vmIndex].status == VM_STATUS_RUNNING) {
         InterlockedAdd(g_dispatchState[0].processedCount, 1);
         g_dispatchResults[entityIndex] = 1;  // Processed successfully
     } else {
         InterlockedAdd(g_dispatchState[0].errorCount, 1);
-        g_dispatchResults[entityIndex] = vm.error;  // Store error code
+        g_dispatchResults[entityIndex] = g_vmStates[vmIndex].error;  // Store error code
     }
-    
-    // Write back VM state (for debugging if needed)
-    g_vmStates[vmIndex] = vm;
     
     // Clear current entity
     vm_clear_current_entity();
@@ -280,6 +277,41 @@ void dispatch_init_kernel() {
 [numthreads(1, 1, 1)]
 void dispatch_finalize_kernel() {
     g_dispatchState[0].status = DISPATCH_STATUS_COMPLETED;
+}
+
+// =============================================================================
+// Simple Test Dispatch Kernel (for debugging)
+// =============================================================================
+
+// A minimal dispatch kernel that just marks entities as processed
+// without executing the full VM. Used to verify infrastructure works.
+[shader("compute")]
+[numthreads(DISPATCH_THREAD_GROUP_SIZE, 1, 1)]
+void system_dispatch_simple(
+    uint3 threadId : SV_DispatchThreadID
+) {
+    uint entityIndex = threadId.x;
+    DispatchConfig config = g_dispatchConfig[0];
+    
+    // Bounds check
+    if (entityIndex >= config.entityCount) {
+        return;
+    }
+    
+    // Get entity from dispatch list
+    uint entityId = g_dispatchEntityList[entityIndex];
+    
+    // Get entity table pointer
+    uint tablePtr = entity_get_table_ptr(entityId);
+    if (tablePtr == 0) {
+        InterlockedAdd(g_dispatchState[0].skippedCount, 1);
+        g_dispatchResults[entityIndex] = 0;
+        return;
+    }
+    
+    // For now, just mark as processed without executing VM
+    InterlockedAdd(g_dispatchState[0].processedCount, 1);
+    g_dispatchResults[entityIndex] = 1;
 }
 
 // =============================================================================

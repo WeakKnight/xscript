@@ -328,6 +328,8 @@ bool table_hasmetamethod(XValue t, uint metaIndex) {
 // Get next key-value pair after given key
 // Returns true if there is a next pair, false if end of table
 bool table_next(XValue t, inout XValue key, out XValue value) {
+    value = XValue::nil();  // Initialize out parameter
+    
     if (t.type != TYPE_TABLE) {
         return false;
     }

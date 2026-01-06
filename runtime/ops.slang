@@ -93,10 +93,11 @@ static const uint VM_STATUS_WAITING_HOST = 2;
 static const uint VM_STATUS_ERROR        = 3;
 static const uint VM_STATUS_COMPLETED    = 4;
 
-// Stack size limited to fit within shader structured buffer element size (2048 bytes)
-// Stack: 160 XValues * 12 bytes = 1920 bytes, leaving room for sp, fp, pc, status, error
-static const uint VM_STACK_SIZE = 160;
-static const uint VM_CALL_STACK_SIZE = 32;
+// Stack size reduced for GPU compatibility
+// For GPU dispatch, ECS system functions typically need small stacks
+// Stack: 32 XValues * 12 bytes = 384 bytes, leaving plenty of room
+static const uint VM_STACK_SIZE = 32;
+static const uint VM_CALL_STACK_SIZE = 8;
 
 struct VMState {
     XValue stack[VM_STACK_SIZE];
